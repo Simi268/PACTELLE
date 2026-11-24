@@ -69,3 +69,8 @@ class Contract(Base):
         "Organization",
         back_populates="contracts"
     )
+    documents = relationship(
+    "ContractDocument",
+    back_populates="contract",
+    cascade="all, delete-orphan"
+    )

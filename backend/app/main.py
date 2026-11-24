@@ -4,11 +4,37 @@ from sqlalchemy import text
 
 from app.core.database import get_db
 
+from app.api.v1.documents import router as documents_router
+
+from app.api.v1.documents import router as documents_router
+
+from app.api.v1.extractions import router as extraction_router
+
+from app.api.v1.clauses import router as clauses_router
+
+from app.api.v1.evidence import router as evidence_router
+
 
 app = FastAPI(
     title="PACTELLE API",
     description="Intelligent Contract and Policy Intelligence Platform",
     version="0.1.0"
+)
+app.include_router(
+    documents_router,
+    prefix="/api/v1"
+)
+app.include_router(
+    extraction_router,
+    prefix="/api/v1"
+)
+app.include_router(
+    clauses_router,
+    prefix="/api/v1"
+)
+app.include_router(
+    evidence_router,
+    prefix="/api/v1"
 )
 
 
