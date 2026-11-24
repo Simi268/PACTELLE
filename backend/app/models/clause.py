@@ -9,11 +9,11 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     UniqueConstraint,
-    func
+    func,
+    Uuid
 )
 
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import Uuid
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
@@ -92,4 +92,10 @@ class ContractClause(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False
+    )
+
+    evidence_records = relationship(
+        "EvidenceRecord",
+        back_populates="clause",
+        cascade="all, delete-orphan"
     )

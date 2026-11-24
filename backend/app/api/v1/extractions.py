@@ -5,6 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.dependencies import get_authorized_document
+
 from app.models.document import ContractDocument
 from app.models.document_text import DocumentTextUnit
 
@@ -19,22 +21,13 @@ router = APIRouter(
 
 @router.post("/{document_id}/extract")
 def extract_uploaded_document(
-    document_id: uuid.UUID,
+    document: ContractDocument = Depends(get_authorized_document),
     db: Session = Depends(get_db)
 ):
 
-    document = db.query(ContractDocument).filter(
-        ContractDocument.id == document_id
-    ).first()
-
-    if not document:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found"
-        )
+    document_id = document.id
 
     backend_root = Path(__file__).resolve().parents[3]
-
     file_path = backend_root / document.storage_path
 
     if not file_path.is_file():
@@ -100,7 +93,7 @@ def extract_uploaded_document(
             )
         }
 
-    except Exception as exc:
+    except Exception:
 
         db.rollback()
 
@@ -114,24 +107,17 @@ def extract_uploaded_document(
 
         raise HTTPException(
             status_code=500,
-            detail=f"Document extraction failed: {str(exc)}"
+            detail="Document extraction failed"
         )
+
 
 @router.get("/{document_id}/text")
 def get_extracted_text(
-    document_id: uuid.UUID,
+    document: ContractDocument = Depends(get_authorized_document),
     db: Session = Depends(get_db)
 ):
 
-    document = db.query(ContractDocument).filter(
-        ContractDocument.id == document_id
-    ).first()
-
-    if not document:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found"
-        )
+    document_id = document.id
 
     units = db.query(DocumentTextUnit).filter(
         DocumentTextUnit.document_id == document_id

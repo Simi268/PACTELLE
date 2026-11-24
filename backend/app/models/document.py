@@ -7,11 +7,11 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     BigInteger,
-    func
+    func,
+    Uuid
 )
 
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy import Uuid
 
 from app.core.database import Base
 
@@ -74,4 +74,10 @@ class ContractDocument(Base):
     contract = relationship(
         "Contract",
         back_populates="documents"
+    )
+
+    evidence_records = relationship(
+        "EvidenceRecord",
+        back_populates="document",
+        cascade="all, delete-orphan"
     )

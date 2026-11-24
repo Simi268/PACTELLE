@@ -4,20 +4,22 @@ from sqlalchemy import (
     Column,
     String,
     Text,
-    Integer,
-    Float,
     DateTime,
     ForeignKey,
+    Integer,
+    Float,
     CheckConstraint,
     Index,
-    func,
 )
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 
 from app.core.database import Base
 
 
 class EvidenceRecord(Base):
+
     __tablename__ = "evidence_records"
 
     id = Column(
@@ -28,47 +30,63 @@ class EvidenceRecord(Base):
 
     document_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("contract_documents.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True
+        ForeignKey(
+            "contract_documents.id",
+            ondelete="CASCADE"
+        ),
+        nullable=False
     )
 
     clause_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("contract_clauses.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True
+        ForeignKey(
+            "contract_clauses.id",
+            ondelete="CASCADE"
+        ),
+        nullable=False
     )
 
-    # What PACTELLE has identified
-    claim = Column(Text, nullable=False)
+    claim = Column(
+        Text,
+        nullable=False
+    )
 
-    # Type of information represented by the claim
     evidence_type = Column(
         String(50),
-        nullable=False,
-        index=True
+        nullable=False
     )
 
-    # Exact text from the original document
-    evidence_text = Column(Text, nullable=False)
+    evidence_text = Column(
+        Text,
+        nullable=False
+    )
 
-    # Source location
-    page_number = Column(Integer, nullable=True)
-    char_start = Column(Integer, nullable=True)
-    char_end = Column(Integer, nullable=True)
+    page_number = Column(
+        Integer,
+        nullable=True
+    )
 
-    # How this evidence was extracted
+    char_start = Column(
+        Integer,
+        nullable=True
+    )
+
+    char_end = Column(
+        Integer,
+        nullable=True
+    )
+
     extraction_method = Column(
         String(50),
         nullable=False,
         default="rule_based"
     )
 
-    # Confidence is optional until we have a calibrated scoring method
-    confidence = Column(Float, nullable=True)
+    confidence = Column(
+        Float,
+        nullable=True
+    )
 
-    # Human verification status
     verification_status = Column(
         String(30),
         nullable=False,
@@ -82,17 +100,60 @@ class EvidenceRecord(Base):
     )
 
     __table_args__ = (
+
         CheckConstraint(
-            "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
+            "confidence IS NULL OR "
+            "(confidence >= 0 AND confidence <= 1)",
             name="check_evidence_confidence_range"
         ),
+
         CheckConstraint(
-            "char_start IS NULL OR char_end IS NULL OR char_end >= char_start",
+            "char_start IS NULL OR "
+            "char_end IS NULL OR "
+            "char_end >= char_start",
             name="check_evidence_character_range"
         ),
+
+        CheckConstraint(
+            "verification_status IN "
+            "('unverified', 'verified', 'rejected')",
+            name="ck_evidence_verification_status"
+        ),
+
         Index(
             "ix_evidence_document_clause",
             "document_id",
             "clause_id"
         ),
+
+        Index(
+            "ix_evidence_records_clause_id",
+            "clause_id"
+        ),
+
+        Index(
+            "ix_evidence_records_document_id",
+            "document_id"
+        ),
+
+        Index(
+            "ix_evidence_records_evidence_type",
+            "evidence_type"
+        ),
+    )
+
+    document = relationship(
+        "ContractDocument",
+        back_populates="evidence_records"
+    )
+
+    clause = relationship(
+        "ContractClause",
+        back_populates="evidence_records"
+    )
+
+    risk_finding_links = relationship(
+        "RiskFindingEvidence",
+        back_populates="evidence_record",
+        cascade="all, delete-orphan"
     )

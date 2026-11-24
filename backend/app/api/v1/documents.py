@@ -1,11 +1,23 @@
 import uuid
 
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from pathlib import Path
+
+from fastapi import (
+    APIRouter,
+    UploadFile,
+    File,
+    Depends,
+    HTTPException
+)
+
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.dependencies import get_authorized_contract
+
 from app.models.contract import Contract
 from app.models.document import ContractDocument
+
 from app.services.document_storage import save_document
 
 
@@ -17,25 +29,15 @@ router = APIRouter(
 
 @router.post("/upload/{contract_id}")
 async def upload_document(
-    contract_id: uuid.UUID,
+    contract: Contract = Depends(get_authorized_contract),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
 
-    contract = db.query(Contract).filter(
-        Contract.id == contract_id
-    ).first()
-
-    if not contract:
-        raise HTTPException(
-            status_code=404,
-            detail="Contract not found"
-        )
-
     file_data = await save_document(file)
 
     document = ContractDocument(
-        contract_id=contract_id,
+        contract_id=contract.id,
         original_filename=file_data["original_filename"],
         stored_filename=file_data["stored_filename"],
         storage_path=file_data["storage_path"],
@@ -52,7 +54,6 @@ async def upload_document(
     except Exception:
         db.rollback()
 
-        from pathlib import Path
         Path(file_data["storage_path"]).unlink(missing_ok=True)
 
         raise HTTPException(

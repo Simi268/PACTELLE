@@ -1,9 +1,8 @@
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.dependencies import get_authorized_document
 
 from app.models.document import ContractDocument
 from app.models.document_text import DocumentTextUnit
@@ -20,20 +19,11 @@ router = APIRouter(
 
 @router.post("/{document_id}/segment")
 def segment_document_clauses(
-    document_id: uuid.UUID,
+    document: ContractDocument = Depends(get_authorized_document),
     db: Session = Depends(get_db)
 ):
 
-    document = db.query(ContractDocument).filter(
-        ContractDocument.id == document_id
-    ).first()
-
-    if not document:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found"
-        )
+    document_id = document.id
 
     text_units = db.query(DocumentTextUnit).filter(
         DocumentTextUnit.document_id == document_id
@@ -42,7 +32,6 @@ def segment_document_clauses(
     ).all()
 
     if not text_units:
-
         raise HTTPException(
             status_code=400,
             detail="Document has not been extracted"
@@ -60,7 +49,6 @@ def segment_document_clauses(
         all_clauses.extend(clauses)
 
     if not all_clauses:
-
         raise HTTPException(
             status_code=422,
             detail="No numbered clauses could be identified"
@@ -93,24 +81,16 @@ def segment_document_clauses(
         )
 
     return {
-
         "message": "Clauses identified successfully",
-
         "document_id": str(document_id),
-
         "total_clauses": len(all_clauses),
-
         "clauses": [
-
             {
                 "clause_number": clause["clause_number"],
                 "clause_title": clause["clause_title"],
                 "category": clause["category"],
                 "page_number": clause["page_number"]
             }
-
             for clause in all_clauses
-
         ]
-
     }

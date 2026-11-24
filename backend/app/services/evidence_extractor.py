@@ -1,16 +1,35 @@
+
 import re
 
+
+# --------------------------------------------------
+# RENEWAL EVIDENCE PATTERNS
+# --------------------------------------------------
+
+RENEWAL_PERIOD_PATTERN = re.compile(
+    r"\bautomatically\s+renew\s+for\s+successive\b.*?\bperiods?\b",
+    re.IGNORECASE | re.DOTALL
+)
+
+RENEWAL_NOTICE_PATTERN = re.compile(
+    r"\bnotice\s+of\s+non-renewal\b.*?\bcurrent\s+term\b",
+    re.IGNORECASE | re.DOTALL
+)
+
+
+# --------------------------------------------------
+# SENTENCE SPLITTER
+# --------------------------------------------------
 
 def split_sentences_with_offsets(text: str):
     """
     Split contractual text into sentences.
-    Exclude numbered clause headings and preserve offsets.
+    Exclude numbered clause headings and preserve exact offsets.
     """
 
     sentences = []
 
     lines = text.splitlines(keepends=True)
-
     text_start = 0
 
     if lines:
@@ -25,9 +44,13 @@ def split_sentences_with_offsets(text: str):
 
     content = text[text_start:]
 
+    # Normalize line breaks for sentence detection.
+    # Preserve the original text and its character positions.
+    normalized_content = re.sub(r"[\r\n]+", " ", content)
+
     pattern = re.compile(r"[^.!?]+(?:[.!?]+|$)")
 
-    for match in pattern.finditer(content):
+    for match in pattern.finditer(normalized_content):
 
         raw_sentence = match.group()
         sentence = raw_sentence.strip()
@@ -42,8 +65,11 @@ def split_sentences_with_offsets(text: str):
         start = text_start + match.start() + leading_spaces
         end = start + len(sentence)
 
+        # Always retain the exact original source substring.
+        source_sentence = text[start:end]
+
         sentences.append({
-            "text": sentence,
+            "text": source_sentence,
             "start": start,
             "end": end
         })
@@ -51,7 +77,11 @@ def split_sentences_with_offsets(text: str):
     return sentences
 
 
-def extract_number(pattern_text: str, unit: str) -> str | None:
+# --------------------------------------------------
+# NUMBER EXTRACTION
+# --------------------------------------------------
+
+def extract_number(pattern_text: str, unit: str) -> int | None:
     """
     Extract numeric values from formats such as:
     thirty (30) days
@@ -82,49 +112,74 @@ def extract_number(pattern_text: str, unit: str) -> str | None:
         return None
 
     number = match.group(1) or match.group(2)
+
     return int(number)
 
 
+# --------------------------------------------------
+# EVIDENCE EXTRACTION
+# --------------------------------------------------
+
 def extract_evidence_from_clause(clause):
     """
-    Extract structured claims supported by exact source sentences.
+    Extract structured claims supported by exact source passages.
+    Supports both sentence-level and phrase-level evidence.
     """
 
     category = clause.category
-    sentences = split_sentences_with_offsets(clause.source_text)
+
+    sentences = split_sentences_with_offsets(
+        clause.source_text
+    )
 
     results = []
 
-    # IMPORTANT: This helper belongs inside the main function.
+    # --------------------------------------------------
+    # EVIDENCE CREATION HELPER
+    # --------------------------------------------------
+
     def add_evidence(
-        evidence_type: str,
-        claim: str,
-        sentence_data: dict
+        evidence_type,
+        claim,
+        sentence_data,
+        phrase_match=None
     ):
 
-        sentence = sentence_data["text"]
+        if phrase_match:
+
+            relative_start = (
+                sentence_data["start"] + phrase_match.start()
+            )
+
+            relative_end = (
+                sentence_data["start"] + phrase_match.end()
+            )
+
+        else:
+
+            relative_start = sentence_data["start"]
+            relative_end = sentence_data["end"]
+
+        evidence_text = clause.source_text[
+            relative_start:relative_end
+        ]
 
         results.append({
-            "claim": claim,
             "evidence_type": evidence_type,
-            "evidence_text": sentence,
+            "claim": claim,
+            "evidence_text": evidence_text,
             "page_number": clause.page_number,
-
-            # Page-relative character positions
-            "char_start": (
-                clause.char_start + sentence_data["start"]
-            ),
-
-            "char_end": (
-                clause.char_start + sentence_data["end"]
-            ),
-
+            "char_start": clause.char_start + relative_start,
+            "char_end": clause.char_start + relative_end,
             "extraction_method": "rule_based",
             "confidence": None,
-            "verification_status": "unverified",
+            "verification_status": "unverified"
         })
 
-    # Process every sentence
+    # --------------------------------------------------
+    # PROCESS SENTENCES
+    # --------------------------------------------------
+
     for sentence_data in sentences:
 
         sentence = sentence_data["text"]
@@ -140,7 +195,8 @@ def extract_evidence_from_clause(clause):
 
                 days = extract_number(sentence, "days")
 
-                if days:
+                if days is not None:
+
                     add_evidence(
                         "payment_deadline",
                         f"Payment is due within {days} days.",
@@ -151,7 +207,8 @@ def extract_evidence_from_clause(clause):
 
                 days = extract_number(sentence, "days")
 
-                if days:
+                if days is not None:
+
                     add_evidence(
                         "fee_increase_notice",
                         f"Fee increases require at least {days} days' advance written notice.",
@@ -164,26 +221,44 @@ def extract_evidence_from_clause(clause):
 
         elif category == "renewal":
 
-            if "automatically renew" in lower or "automatic renewal" in lower:
+            renewal_period_match = (
+                RENEWAL_PERIOD_PATTERN.search(sentence)
+            )
 
-                months = extract_number(sentence, "months")
+            if renewal_period_match:
 
-                if months:
+                months = extract_number(
+                    renewal_period_match.group(),
+                    "months"
+                )
+
+                if months is not None:
+
                     add_evidence(
                         "renewal_period",
                         f"The agreement automatically renews for successive {months}-month periods.",
-                        sentence_data
+                        sentence_data,
+                        renewal_period_match
                     )
 
-            if "notice of non-renewal" in lower:
+            renewal_notice_match = (
+                RENEWAL_NOTICE_PATTERN.search(sentence)
+            )
 
-                days = extract_number(sentence, "days")
+            if renewal_notice_match:
 
-                if days:
+                days = extract_number(
+                    renewal_notice_match.group(),
+                    "days"
+                )
+
+                if days is not None:
+
                     add_evidence(
                         "renewal_notice",
                         f"Non-renewal requires at least {days} days' advance written notice.",
-                        sentence_data
+                        sentence_data,
+                        renewal_notice_match
                     )
 
         # --------------------------------
@@ -196,7 +271,8 @@ def extract_evidence_from_clause(clause):
 
                 days = extract_number(sentence, "days")
 
-                if days:
+                if days is not None:
+
                     add_evidence(
                         "breach_cure_period",
                         f"A material breach has a {days}-day cure period.",
@@ -207,7 +283,8 @@ def extract_evidence_from_clause(clause):
 
                 days = extract_number(sentence, "days")
 
-                if days:
+                if days is not None:
+
                     add_evidence(
                         "termination_notice",
                         f"Customer may terminate for convenience with {days} days' written notice.",
@@ -224,7 +301,8 @@ def extract_evidence_from_clause(clause):
 
                 months = extract_number(sentence, "months")
 
-                if months:
+                if months is not None:
+
                     add_evidence(
                         "liability_cap",
                         f"Aggregate liability is capped by fees paid or payable during the preceding {months} months.",

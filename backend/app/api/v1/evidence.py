@@ -1,7 +1,11 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.dependencies import get_authorized_document
+
 from app.models.document import ContractDocument
 from app.models.clause import ContractClause
 from app.models.evidence_record import EvidenceRecord
@@ -9,6 +13,7 @@ from app.models.evidence_record import EvidenceRecord
 from app.services.evidence_extractor import (
     extract_evidence_from_clause
 )
+
 
 router = APIRouter(
     prefix="/documents",
@@ -18,19 +23,11 @@ router = APIRouter(
 
 @router.post("/{document_id}/extract-evidence")
 def extract_document_evidence(
-    document_id: str,
+    document: ContractDocument = Depends(get_authorized_document),
     db: Session = Depends(get_db)
 ):
 
-    document = db.query(ContractDocument).filter(
-        ContractDocument.id == document_id
-    ).first()
-
-    if not document:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found"
-        )
+    document_id = document.id
 
     clauses = db.query(ContractClause).filter(
         ContractClause.document_id == document_id
@@ -45,7 +42,7 @@ def extract_document_evidence(
         )
 
     try:
-        # Make extraction repeatable without duplicate records.
+
         db.query(EvidenceRecord).filter(
             EvidenceRecord.document_id == document_id
         ).delete(synchronize_session=False)
@@ -59,7 +56,7 @@ def extract_document_evidence(
             for item in extracted:
 
                 evidence = EvidenceRecord(
-                    document_id=document.id,
+                    document_id=document_id,
                     clause_id=clause.id,
                     **item
                 )
@@ -76,7 +73,7 @@ def extract_document_evidence(
         db.commit()
 
         return {
-            "document_id": str(document.id),
+            "document_id": str(document_id),
             "status": "completed",
             "clauses_processed": len(clauses),
             "evidence_records_created": len(all_evidence),

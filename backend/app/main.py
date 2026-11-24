@@ -6,13 +6,15 @@ from app.core.database import get_db
 
 from app.api.v1.documents import router as documents_router
 
-from app.api.v1.documents import router as documents_router
-
 from app.api.v1.extractions import router as extraction_router
 
 from app.api.v1.clauses import router as clauses_router
 
 from app.api.v1.evidence import router as evidence_router
+
+from app.api.v1.auth import router as auth_router
+
+from app.api.v1.organizations import router as organizations_router
 
 
 app = FastAPI(
@@ -36,7 +38,14 @@ app.include_router(
     evidence_router,
     prefix="/api/v1"
 )
-
+app.include_router(
+    auth_router,
+    prefix="/api/v1"
+)
+app.include_router(
+    organizations_router,
+    prefix="/api/v1"
+)
 
 @app.get("/")
 async def root():
