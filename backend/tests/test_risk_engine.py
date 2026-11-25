@@ -16,6 +16,14 @@ from app.models.risk_finding_evidence import RiskFindingEvidence
 
 from app.services.risk_engine import detect_automatic_renewal_risk
 
+from app.models.risk_event import RiskEvent
+
+from app.services.risk_engine import (
+    detect_automatic_renewal_risk,
+    capture_risk_history_context,
+)
+
+
 
 def create_renewal_test_data(db_session):
 
@@ -588,3 +596,178 @@ def test_replacing_supporting_evidence_removes_stale_links(
     assert replacement_evidence.id in linked_ids
     assert renewal_notice.id in linked_ids
     assert len(linked_ids) == 2
+
+def test_new_risk_persists_creation_event(db_session):
+    contract, _, _ = create_renewal_test_data(db_session)
+
+    result = detect_automatic_renewal_risk(
+        db_session,
+        contract.id,
+    )
+
+    assert result["status"] == "created"
+
+    events = (
+        db_session.query(RiskEvent)
+        .filter(
+            RiskEvent.contract_id == contract.id,
+            RiskEvent.event_type == "risk_created",
+        )
+        .all()
+    )
+
+    assert len(events) == 1
+    assert events[0].risk_finding_id is not None
+    assert events[0].source == "system"
+    assert events[0].new_state["risk_type"] == "renewal_exposure"
+    assert len(events[0].evidence_snapshot) == 2
+
+
+def test_verification_upgrade_persists_assessment_event(db_session):
+    contract, renewal_period, renewal_notice = (
+        create_renewal_test_data(db_session)
+    )
+
+    detect_automatic_renewal_risk(db_session, contract.id)
+
+    renewal_period.verification_status = "verified"
+    renewal_notice.verification_status = "verified"
+    db_session.flush()
+
+    detect_automatic_renewal_risk(db_session, contract.id)
+
+    events = (
+        db_session.query(RiskEvent)
+        .filter(
+            RiskEvent.contract_id == contract.id,
+            RiskEvent.event_type == "assessment_changed",
+        )
+        .all()
+    )
+
+    assert len(events) == 1
+    assert events[0].previous_state["assessment_status"] == "provisional"
+    assert events[0].new_state["assessment_status"] == "confirmed"
+
+
+def test_changed_supporting_evidence_persists_evidence_event(db_session):
+    contract, _, renewal_notice = create_renewal_test_data(db_session)
+
+    detect_automatic_renewal_risk(db_session, contract.id)
+
+    previous_state, previous_evidence = capture_risk_history_context(
+        db_session,
+        contract.id,
+    )
+
+    renewal_notice.evidence_text = (
+        "notice of non-renewal at least thirty (30) days "
+        "before the end of the current term, as specified"
+    )
+    db_session.flush()
+
+    detect_automatic_renewal_risk(
+        db_session,
+        contract.id,
+        previous_state=previous_state,
+        previous_evidence=previous_evidence,
+    )
+
+    events = (
+        db_session.query(RiskEvent)
+        .filter(
+            RiskEvent.contract_id == contract.id,
+            RiskEvent.event_type == "evidence_changed",
+        )
+        .all()
+    )
+
+    assert len(events) == 1
+    assert events[0].previous_state is not None
+    assert events[0].evidence_snapshot is not None
+
+
+def test_missing_evidence_persists_assessment_downgrade(db_session):
+    contract, renewal_period, renewal_notice = (
+        create_renewal_test_data(db_session)
+    )
+
+    renewal_period.verification_status = "verified"
+    renewal_notice.verification_status = "verified"
+
+    detect_automatic_renewal_risk(db_session, contract.id)
+
+    renewal_period.verification_status = "rejected"
+    db_session.flush()
+
+    result = detect_automatic_renewal_risk(db_session, contract.id)
+
+    assert result["status"] == "reconciled"
+
+    events = (
+        db_session.query(RiskEvent)
+        .filter(
+            RiskEvent.contract_id == contract.id,
+            RiskEvent.event_type == "assessment_changed",
+        )
+        .all()
+    )
+
+    assert len(events) == 1
+    assert events[0].previous_state["assessment_status"] == "confirmed"
+    assert events[0].new_state["assessment_status"] == "provisional"
+
+    finding = db_session.query(RiskFinding).filter(
+        RiskFinding.contract_id == contract.id
+    ).one()
+
+    assert finding.status == "open"
+    assert finding.assessment_status == "provisional"
+
+
+def test_risk_events_rollback_with_risk_transaction(db_session):
+    contract, _, _ = create_renewal_test_data(db_session)
+
+    result = detect_automatic_renewal_risk(
+        db_session,
+        contract.id,
+        commit=False,
+    )
+
+    assert result["status"] == "created"
+
+    # Flush pending writes without committing the transaction.
+    db_session.flush()
+    # The event exists inside the current transaction.
+    events_before_rollback = (
+    db_session.query(RiskEvent)
+    .filter(RiskEvent.contract_id == contract.id)
+    .all()
+)
+
+    # The event exists inside the current transaction.
+    events_before_rollback = (
+        db_session.query(RiskEvent)
+        .filter(RiskEvent.contract_id == contract.id)
+        .all()
+    )
+
+    assert len(events_before_rollback) == 1
+
+    # Roll back the risk and its event together.
+    db_session.rollback()
+
+    events_after_rollback = (
+        db_session.query(RiskEvent)
+        .filter(RiskEvent.contract_id == contract.id)
+        .all()
+    )
+
+    findings_after_rollback = (
+        db_session.query(RiskFinding)
+        .filter(RiskFinding.contract_id == contract.id)
+        .all()
+    )
+
+    assert events_after_rollback == []
+    assert findings_after_rollback == []

@@ -11,7 +11,10 @@ from app.models.evidence_record import EvidenceRecord
 from app.services.document_parser import extract_document
 from app.services.clause_segmenter import segment_clauses
 from app.services.evidence_extractor import extract_evidence_from_clause
-from app.services.risk_engine import detect_automatic_renewal_risk
+from app.services.risk_engine import (
+    detect_automatic_renewal_risk,
+    capture_risk_history_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +256,12 @@ def process_document_pipeline(document_id, attempt_id=None):
             return {"document_id": str(document_id), "status": "needs_ocr"}
 
         previous_evidence = _get_existing_verifications(db, document_id)
+        previous_risk_state, previous_risk_evidence = (
+    capture_risk_history_context(
+        db,
+        document.contract_id,
+    )
+)
 
         _replace_text_units(db, document_id, extracted_units)
         clauses = _replace_clauses(db, document_id)
@@ -261,10 +270,13 @@ def process_document_pipeline(document_id, attempt_id=None):
         )
 
         risk_result = detect_automatic_renewal_risk(
-            db,
-            document.contract_id,
-            commit=False,
-        )
+    db,
+    document.contract_id,
+    commit=False,
+    previous_state=previous_risk_state,
+    previous_evidence=previous_risk_evidence,
+    source="document_processing",
+)
 
         document.processing_status = "completed"
         document.processing_started_at = None
