@@ -5,6 +5,10 @@ from app.core.security import create_access_token
 from app.models.contract import Contract
 from app.models.risk_finding import RiskFinding
 
+from app.models.clause import ContractClause
+from app.models.evidence_record import EvidenceRecord
+from app.models.risk_finding_evidence import RiskFindingEvidence
+
 
 def auth_headers(user):
     token = create_access_token(user.id)
@@ -480,12 +484,181 @@ def test_organization_cannot_access_another_organizations_priorities(
         rule_id="B-001",
         severity="critical",
     )
+    
 
     db_session.commit()
 
     response = api_client.get(
         f"/api/v1/organizations/"
         f"{data['organization_b'].id}/risk-prioritization",
+        headers=auth_headers(data["owner_a"]),
+    )
+
+    assert response.status_code == 404
+
+def create_risk_with_evidence(
+    db_session,
+    contract,
+    document,
+    *,
+    verification_status="verified",
+):
+    finding = create_risk(
+        db_session,
+        contract,
+        assessment_status="confirmed",
+    )
+
+    clause = ContractClause(
+        document_id=document.id,
+        clause_number="8.1",
+        clause_title="Automatic Renewal",
+        category="renewal",
+        source_text="The agreement shall automatically renew.",
+        page_number=2,
+        char_start=100,
+        char_end=150,
+        extraction_method="rule_based",
+    )
+
+    db_session.add(clause)
+    db_session.flush()
+
+    evidence = EvidenceRecord(
+        document_id=document.id,
+        clause_id=clause.id,
+        claim="Automatic renewal provision",
+        evidence_type="renewal_period",
+        evidence_text="The agreement shall automatically renew.",
+        page_number=2,
+        char_start=100,
+        char_end=150,
+        extraction_method="rule_based",
+        confidence=0.95,
+        verification_status=verification_status,
+    )
+
+    db_session.add(evidence)
+    db_session.flush()
+
+    link = RiskFindingEvidence(
+        risk_finding_id=finding.id,
+        evidence_record_id=evidence.id,
+    )
+
+    db_session.add(link)
+    db_session.flush()
+
+    return finding, evidence
+
+def test_risk_explanation_returns_evidence_and_provenance(
+    api_client,
+    db_session,
+    contract_api_data,
+):
+    data = contract_api_data
+
+    finding, evidence = create_risk_with_evidence(
+        db_session,
+        data["contract_a"],
+        data["document_a"],
+    )
+
+    db_session.commit()
+
+    response = api_client.get(
+        f"/api/v1/organizations/{data['organization_a'].id}"
+        f"/risk-findings/{finding.id}/explanation",
+        headers=auth_headers(data["owner_a"]),
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+
+    assert result["risk_finding_id"] == str(finding.id)
+    assert result["supporting_evidence"]
+
+    source = result["supporting_evidence"][0]
+
+    print("\nACTUAL EVIDENCE RESPONSE:")
+    print(source)
+
+    assert source["evidence_id"] == str(evidence.id)
+    assert source["document"] == "agreement_a.pdf"
+    assert source["page_number"] == 2
+
+    assert source["clause"]["clause_number"] == "8.1"
+    assert source["clause"]["clause_title"] == "Automatic Renewal"
+    assert source["clause"]["page_number"] == 2
+    assert source["clause"]["char_start"] == 100
+    assert source["clause"]["char_end"] == 150
+
+
+def test_risk_explanation_separates_rejected_evidence(
+    api_client,
+    db_session,
+    contract_api_data,
+):
+    data = contract_api_data
+
+    finding, _ = create_risk_with_evidence(
+        db_session,
+        data["contract_a"],
+        data["document_a"],
+        verification_status="rejected",
+    )
+
+    db_session.commit()
+
+    response = api_client.get(
+        f"/api/v1/organizations/{data['organization_a'].id}"
+        f"/risk-findings/{finding.id}/explanation",
+        headers=auth_headers(data["owner_a"]),
+    )
+
+    assert response.status_code == 200
+
+    result = response.json()
+
+    assert len(result["supporting_evidence"]) == 0
+    assert len(result["rejected_evidence"]) == 1
+
+
+def test_risk_explanation_prevents_cross_organization_access(
+    api_client,
+    db_session,
+    contract_api_data,
+):
+    data = contract_api_data
+
+    finding = create_risk(
+        db_session,
+        data["contract_b"],
+        rule_id="ORG-B-RISK",
+    )
+
+    db_session.commit()
+
+    response = api_client.get(
+        f"/api/v1/organizations/{data['organization_a'].id}"
+        f"/risk-findings/{finding.id}/explanation",
+        headers=auth_headers(data["owner_a"]),
+    )
+
+    assert response.status_code == 404
+
+
+def test_risk_explanation_returns_404_for_missing_finding(
+    api_client,
+    contract_api_data,
+):
+    data = contract_api_data
+
+    missing_id = "00000000-0000-0000-0000-000000000001"
+
+    response = api_client.get(
+        f"/api/v1/organizations/{data['organization_a'].id}"
+        f"/risk-findings/{missing_id}/explanation",
         headers=auth_headers(data["owner_a"]),
     )
 

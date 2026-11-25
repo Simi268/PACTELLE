@@ -32,6 +32,15 @@ from app.services.risk_prioritization import (
     build_investigation_recommendation,
 )
 
+from sqlalchemy.orm import joinedload
+
+from app.models.risk_finding_evidence import RiskFindingEvidence
+
+from app.schemas.risk_explanation import RiskExplanationResponse
+
+from app.services.risk_explanation import explain_risk_finding
+
+from app.models.evidence_record import EvidenceRecord
 
 router = APIRouter(
     prefix="/organizations",
@@ -648,3 +657,58 @@ def get_risk_prioritization(
         ),
         "prioritized_risks": prioritized,
     }
+
+# =========================================================
+# 7. EXPLAINABLE RISK INTELLIGENCE
+# =========================================================
+
+@router.get(
+    "/{organization_id}/risk-findings/{risk_finding_id}/explanation",
+    response_model=RiskExplanationResponse,
+)
+def get_risk_explanation(
+    organization_id: UUID,
+    risk_finding_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    finding = (
+        db.query(RiskFinding)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .options(
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            ).joinedload(
+                EvidenceRecord.clause
+            ),
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            ).joinedload(
+                EvidenceRecord.document
+            ),
+        )
+        .filter(
+            RiskFinding.id == risk_finding_id,
+            Contract.organization_id == organization_id,
+        )
+        .first()
+    )
+
+    if finding is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Risk finding not found.",
+        )
+
+    return explain_risk_finding(finding)
