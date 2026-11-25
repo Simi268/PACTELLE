@@ -7,7 +7,7 @@ import re
 # --------------------------------------------------
 
 RENEWAL_PERIOD_PATTERN = re.compile(
-    r"\bautomatically\s+renew\s+for\s+successive\b.*?\bperiods?\b",
+    r"\bautomatically\s+renews?\s+for\s+successive\b.*?\bperiods?\b",
     re.IGNORECASE | re.DOTALL
 )
 

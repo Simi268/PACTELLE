@@ -440,3 +440,151 @@ def test_provisional_risk_upgrades_after_evidence_verification(db_session):
     ).one()
 
     assert finding.assessment_status == "confirmed"
+
+def test_rejected_evidence_downgrades_existing_confirmed_risk(
+    db_session,
+):
+    contract, renewal_period, renewal_notice = (
+        create_renewal_test_data(db_session)
+    )
+
+    renewal_period.verification_status = "verified"
+    renewal_notice.verification_status = "verified"
+
+    db_session.flush()
+
+    first_result = detect_automatic_renewal_risk(
+        db_session,
+        contract.id,
+    )
+
+    assert first_result["assessment_status"] == "confirmed"
+
+    finding = db_session.query(RiskFinding).filter(
+        RiskFinding.contract_id == contract.id
+    ).one()
+
+    assert finding.assessment_status == "confirmed"
+
+    renewal_period.verification_status = "rejected"
+    db_session.flush()
+
+    second_result = detect_automatic_renewal_risk(
+        db_session,
+        contract.id,
+    )
+
+    db_session.refresh(finding)
+
+    assert second_result["status"] == "reconciled"
+    assert finding.assessment_status == "provisional"
+    assert finding.status == "open"
+
+    linked_count = db_session.query(
+        func.count(RiskFindingEvidence.evidence_record_id)
+    ).filter(
+        RiskFindingEvidence.risk_finding_id == finding.id
+    ).scalar()
+
+    assert linked_count == 0
+
+def test_missing_evidence_downgrades_existing_finding(
+    db_session,
+):
+    contract, renewal_period, renewal_notice = (
+        create_renewal_test_data(db_session)
+    )
+
+    first_result = detect_automatic_renewal_risk(
+        db_session,
+        contract.id,
+    )
+
+    assert first_result["assessment_status"] == "provisional"
+
+    finding = db_session.query(RiskFinding).filter(
+        RiskFinding.contract_id == contract.id
+    ).one()
+
+    db_session.delete(renewal_notice)
+    db_session.flush()
+
+    result = detect_automatic_renewal_risk(
+        db_session,
+        contract.id,
+    )
+
+    db_session.refresh(finding)
+
+    assert result["status"] == "reconciled"
+    assert finding.assessment_status == "provisional"
+    assert finding.status == "open"
+
+    linked_count = db_session.query(
+        func.count(RiskFindingEvidence.evidence_record_id)
+    ).filter(
+        RiskFindingEvidence.risk_finding_id == finding.id
+    ).scalar()
+
+    assert linked_count == 0
+
+def test_replacing_supporting_evidence_removes_stale_links(
+    db_session,
+):
+    contract, renewal_period, renewal_notice = (
+        create_renewal_test_data(db_session)
+    )
+
+    first_result = detect_automatic_renewal_risk(
+        db_session,
+        contract.id,
+    )
+
+    finding = db_session.query(RiskFinding).filter(
+        RiskFinding.contract_id == contract.id
+    ).one()
+
+    original_evidence_id = renewal_period.id
+
+    replacement_evidence = EvidenceRecord(
+        document_id=renewal_period.document_id,
+        clause_id=renewal_period.clause_id,
+        claim="The agreement automatically renews for 12-month periods.",
+        evidence_type="renewal_period",
+        evidence_text=(
+            "automatically renews for successive "
+            "twelve (12) month periods"
+        ),
+        page_number=1,
+        char_start=25,
+        char_end=90,
+        verification_status="verified",
+    )
+
+    db_session.add(replacement_evidence)
+
+    renewal_period.verification_status = "rejected"
+
+    db_session.flush()
+
+    result = detect_automatic_renewal_risk(
+        db_session,
+        contract.id,
+    )
+
+    assert result["status"] == "already_exists"
+    assert result["assessment_status"] == "provisional"
+
+    linked_ids = {
+        row[0]
+        for row in db_session.query(
+            RiskFindingEvidence.evidence_record_id
+        ).filter(
+            RiskFindingEvidence.risk_finding_id == finding.id
+        ).all()
+    }
+
+    assert original_evidence_id not in linked_ids
+    assert replacement_evidence.id in linked_ids
+    assert renewal_notice.id in linked_ids
+    assert len(linked_ids) == 2

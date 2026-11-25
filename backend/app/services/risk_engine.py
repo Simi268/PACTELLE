@@ -15,27 +15,103 @@ RENEWAL_RULE_ID = "RENEWAL-001"
 RENEWAL_RULE_VERSION = "1.0"
 
 
+def _get_active_finding(db: Session, contract_id):
+    return (
+        db.query(RiskFinding)
+        .filter(
+            RiskFinding.contract_id == contract_id,
+            RiskFinding.rule_id == RENEWAL_RULE_ID,
+            RiskFinding.status != "resolved",
+        )
+        .first()
+    )
+
+
+def _sync_evidence_links(db, finding, supporting_evidence):
+    """
+    Make the finding's evidence links match the currently
+    selected supporting evidence exactly.
+    """
+
+    valid_ids = {
+        evidence.id
+        for evidence in supporting_evidence
+    }
+
+    existing_links = (
+        db.query(RiskFindingEvidence)
+        .filter(
+            RiskFindingEvidence.risk_finding_id == finding.id
+        )
+        .all()
+    )
+
+    for link in existing_links:
+        if link.evidence_record_id not in valid_ids:
+            db.delete(link)
+
+    existing_ids = {
+        link.evidence_record_id
+        for link in existing_links
+        if link.evidence_record_id in valid_ids
+    }
+
+    for evidence in supporting_evidence:
+        if evidence.id not in existing_ids:
+            db.add(
+                RiskFindingEvidence(
+                    risk_finding_id=finding.id,
+                    evidence_record_id=evidence.id,
+                )
+            )
+
+
+def _reconcile_incomplete_finding(db, finding, reason):
+    """
+    Keep an existing finding open, but downgrade its assessment
+    when its supporting evidence is incomplete or invalid.
+    """
+
+    if finding is None:
+        return {
+            "status": "skipped",
+            "reason": reason,
+        }
+
+    finding.assessment_status = "provisional"
+
+    # No current evidence combination can justify the old links.
+    _sync_evidence_links(
+        db,
+        finding,
+        supporting_evidence=[],
+    )
+
+    db.commit()
+    db.refresh(finding)
+
+    return {
+        "status": "reconciled",
+        "risk_finding_id": str(finding.id),
+        "assessment_status": "provisional",
+        "reason": reason,
+    }
+
+
 def detect_automatic_renewal_risk(
     db: Session,
     contract_id,
 ):
     """
-    Detect automatic renewal exposure using extracted
-    contractual evidence with source provenance.
-
-    Creates a risk finding, calculates the non-renewal deadline,
-    links supporting evidence, and tracks evidence verification.
+    Detect automatic renewal exposure using contractual evidence.
 
     Assessment status:
-    - provisional: at least one supporting evidence record is unverified
-    - confirmed: all selected supporting evidence records are verified
+    - provisional: supporting evidence is incomplete or not fully verified
+    - confirmed: both selected supporting evidence records are verified
 
-    Rejected evidence is never used.
+    A missing or rejected evidence record does not automatically
+    resolve an existing risk finding.
     """
-
-    # --------------------------------------------------
-    # 1. FETCH CONTRACT
-    # --------------------------------------------------
 
     contract = (
         db.query(Contract)
@@ -43,18 +119,17 @@ def detect_automatic_renewal_risk(
         .first()
     )
 
-    if not contract:
+    if contract is None:
         raise ValueError("Contract not found.")
 
-    if not contract.expiration_date:
-        return {
-            "status": "skipped",
-            "reason": "Contract expiration date is missing."
-        }
+    existing_finding = _get_active_finding(db, contract_id)
 
-    # --------------------------------------------------
-    # 2. FETCH CONTRACT DOCUMENTS
-    # --------------------------------------------------
+    if not contract.expiration_date:
+        return _reconcile_incomplete_finding(
+            db,
+            existing_finding,
+            "Contract expiration date is missing.",
+        )
 
     documents = (
         db.query(ContractDocument)
@@ -65,18 +140,16 @@ def detect_automatic_renewal_risk(
     )
 
     document_ids = [
-        document.id for document in documents
+        document.id
+        for document in documents
     ]
 
     if not document_ids:
-        return {
-            "status": "skipped",
-            "reason": "No contract documents found."
-        }
-
-    # --------------------------------------------------
-    # 3. FETCH VALID RENEWAL EVIDENCE
-    # --------------------------------------------------
+        return _reconcile_incomplete_finding(
+            db,
+            existing_finding,
+            "No contract documents found.",
+        )
 
     evidence_records = (
         db.query(EvidenceRecord)
@@ -84,9 +157,9 @@ def detect_automatic_renewal_risk(
             EvidenceRecord.document_id.in_(document_ids),
             EvidenceRecord.evidence_type.in_([
                 "renewal_period",
-                "renewal_notice"
+                "renewal_notice",
             ]),
-            EvidenceRecord.verification_status != "rejected"
+            EvidenceRecord.verification_status != "rejected",
         )
         .all()
     )
@@ -104,12 +177,13 @@ def detect_automatic_renewal_risk(
     ]
 
     if not renewal_period_records or not renewal_notice_records:
-        return {
-            "status": "skipped",
-            "reason": "Required renewal evidence is incomplete."
-        }
+        return _reconcile_incomplete_finding(
+            db,
+            existing_finding,
+            "Required renewal evidence is incomplete.",
+        )
 
-    # Prefer verified evidence when multiple records exist.
+    # Prefer verified evidence.
     renewal_period_records.sort(
         key=lambda record: (
             record.verification_status != "verified"
@@ -122,93 +196,46 @@ def detect_automatic_renewal_risk(
         )
     )
 
-    renewal_period = renewal_period_records[0]
-    renewal_notice = renewal_notice_records[0]
-
     supporting_evidence = [
-        renewal_period,
-        renewal_notice
+        renewal_period_records[0],
+        renewal_notice_records[0],
     ]
-
-    # --------------------------------------------------
-    # 4. DETERMINE ASSESSMENT STATUS
-    # --------------------------------------------------
 
     assessment_status = (
         "confirmed"
         if all(
-            evidence.verification_status == "verified"
-            for evidence in supporting_evidence
+            record.verification_status == "verified"
+            for record in supporting_evidence
         )
         else "provisional"
     )
 
-    # --------------------------------------------------
-    # 5. EXTRACT NOTICE PERIOD
-    # --------------------------------------------------
-
     notice_days = extract_number(
-        renewal_notice.evidence_text,
-        "days"
+        supporting_evidence[1].evidence_text,
+        "days",
     )
 
     if notice_days is None:
-        return {
-            "status": "skipped",
-            "reason": "Could not determine the notice period."
-        }
-
-    # --------------------------------------------------
-    # 6. CALCULATE NON-RENEWAL DEADLINE
-    # --------------------------------------------------
-
-    non_renewal_deadline = (
-        contract.expiration_date - timedelta(days=notice_days)
-    )
-
-    # --------------------------------------------------
-    # 7. CHECK FOR EXISTING RISK FINDING
-    # --------------------------------------------------
-
-    existing_finding = (
-        db.query(RiskFinding)
-        .filter(
-            RiskFinding.contract_id == contract_id,
-            RiskFinding.rule_id == RENEWAL_RULE_ID,
-            RiskFinding.status != "resolved"
+        return _reconcile_incomplete_finding(
+            db,
+            existing_finding,
+            "Could not determine the notice period.",
         )
-        .first()
+
+    deadline = (
+        contract.expiration_date
+        - timedelta(days=notice_days)
     )
 
     if existing_finding:
-
-        # Synchronize assessment status with current evidence.
         existing_finding.assessment_status = assessment_status
+        existing_finding.deadline_date = deadline
 
-        # Update the calculated deadline.
-        existing_finding.deadline_date = non_renewal_deadline
-
-        # Add missing supporting evidence links.
-        for evidence in supporting_evidence:
-
-            existing_link = (
-                db.query(RiskFindingEvidence)
-                .filter(
-                    RiskFindingEvidence.risk_finding_id
-                    == existing_finding.id,
-                    RiskFindingEvidence.evidence_record_id
-                    == evidence.id
-                )
-                .first()
-            )
-
-            if not existing_link:
-                db.add(
-                    RiskFindingEvidence(
-                        risk_finding_id=existing_finding.id,
-                        evidence_record_id=evidence.id
-                    )
-                )
+        _sync_evidence_links(
+            db,
+            existing_finding,
+            supporting_evidence,
+        )
 
         db.commit()
         db.refresh(existing_finding)
@@ -219,16 +246,8 @@ def detect_automatic_renewal_risk(
             "risk_type": existing_finding.risk_type,
             "severity": existing_finding.severity,
             "assessment_status": existing_finding.assessment_status,
-            "deadline_date": (
-                existing_finding.deadline_date.isoformat()
-                if existing_finding.deadline_date
-                else None
-            )
+            "deadline_date": deadline.isoformat(),
         }
-
-    # --------------------------------------------------
-    # 8. CREATE NEW RISK FINDING
-    # --------------------------------------------------
 
     finding = RiskFinding(
         contract_id=contract_id,
@@ -238,7 +257,7 @@ def detect_automatic_renewal_risk(
             "This contract contains automatic renewal provisions. "
             f"Non-renewal requires at least {notice_days} days' "
             "advance notice. The calculated notice deadline is "
-            f"{non_renewal_deadline.isoformat()}."
+            f"{deadline.isoformat()}."
         ),
         severity="medium",
         status="open",
@@ -247,35 +266,20 @@ def detect_automatic_renewal_risk(
         rule_id=RENEWAL_RULE_ID,
         rule_version=RENEWAL_RULE_VERSION,
         confidence=None,
-        deadline_date=non_renewal_deadline
+        deadline_date=deadline,
     )
 
     db.add(finding)
     db.flush()
 
-    # --------------------------------------------------
-    # 9. LINK SUPPORTING EVIDENCE
-    # --------------------------------------------------
-
-    for evidence in supporting_evidence:
-
-        db.add(
-            RiskFindingEvidence(
-                risk_finding_id=finding.id,
-                evidence_record_id=evidence.id
-            )
-        )
-
-    # --------------------------------------------------
-    # 10. SAVE RISK FINDING
-    # --------------------------------------------------
+    _sync_evidence_links(
+        db,
+        finding,
+        supporting_evidence,
+    )
 
     db.commit()
     db.refresh(finding)
-
-    # --------------------------------------------------
-    # 11. RETURN RESULT
-    # --------------------------------------------------
 
     return {
         "status": "created",
@@ -284,12 +288,10 @@ def detect_automatic_renewal_risk(
         "severity": finding.severity,
         "assessment_status": finding.assessment_status,
         "notice_period_days": notice_days,
-        "deadline_date": finding.deadline_date.isoformat(),
+        "deadline_date": deadline.isoformat(),
         "contract_expiration_date": (
             contract.expiration_date.isoformat()
         ),
-        "non_renewal_deadline": (
-            non_renewal_deadline.isoformat()
-        ),
-        "supporting_evidence_count": len(supporting_evidence)
+        "non_renewal_deadline": deadline.isoformat(),
+        "supporting_evidence_count": len(supporting_evidence),
     }

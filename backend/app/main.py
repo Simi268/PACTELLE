@@ -17,6 +17,10 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.organizations import router as organizations_router
 from app.api.v1.contracts import router as contracts_router
 
+from app.api.v1.document_processing import (
+    router as document_processing_router,
+)
+from app.api.v1.intelligence import router as intelligence_router
 
 app = FastAPI(
     title="PACTELLE API",
@@ -50,6 +54,14 @@ app.include_router(
 app.include_router(
     contracts_router,
     prefix="/api/v1"
+)
+app.include_router(
+    document_processing_router,
+    prefix="/api/v1",
+)
+app.include_router(
+    intelligence_router,
+    prefix="/api/v1",
 )
 
 @app.get("/")
