@@ -15,6 +15,7 @@ from app.api.v1.evidence import router as evidence_router
 from app.api.v1.auth import router as auth_router
 
 from app.api.v1.organizations import router as organizations_router
+from app.api.v1.contracts import router as contracts_router
 
 
 app = FastAPI(
@@ -44,6 +45,10 @@ app.include_router(
 )
 app.include_router(
     organizations_router,
+    prefix="/api/v1"
+)
+app.include_router(
+    contracts_router,
     prefix="/api/v1"
 )
 

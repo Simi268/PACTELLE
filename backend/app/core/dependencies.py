@@ -246,3 +246,60 @@ def require_contract_role(*allowed_roles: str):
         return contract
 
     return contract_role_dependency
+
+def require_document_role(*allowed_roles: str):
+
+    if not allowed_roles:
+        raise ValueError("At least one allowed role must be specified.")
+
+    invalid_roles = set(allowed_roles) - VALID_ROLES
+
+    if invalid_roles:
+        raise ValueError(
+            f"Invalid organization roles: {invalid_roles}"
+        )
+
+    def document_role_dependency(
+        document_id: UUID,
+        current_user: User = Depends(get_current_active_user),
+        db: Session = Depends(get_db)
+    ) -> ContractDocument:
+
+        result = (
+            db.query(
+                ContractDocument,
+                OrganizationMembership.role
+            )
+            .join(
+                Contract,
+                Contract.id == ContractDocument.contract_id
+            )
+            .join(
+                OrganizationMembership,
+                OrganizationMembership.organization_id
+                == Contract.organization_id
+            )
+            .filter(
+                ContractDocument.id == document_id,
+                OrganizationMembership.user_id == current_user.id
+            )
+            .first()
+        )
+
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found."
+            )
+
+        document, user_role = result
+
+        if user_role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to perform this operation."
+            )
+
+        return document
+
+    return document_role_dependency
