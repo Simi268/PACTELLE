@@ -313,3 +313,180 @@ def test_organization_a_cannot_see_organization_b_risks(
     result = response.json()
 
     assert result["summary"]["total_findings"] == 1
+
+def test_risk_prioritization_ranks_critical_risks(
+    api_client,
+    db_session,
+    contract_api_data,
+):
+    data = contract_api_data
+    today = date.today()
+
+    create_risk(
+        db_session,
+        data["contract_a"],
+        rule_id="LOW-001",
+        severity="low",
+        deadline=today + timedelta(days=90),
+    )
+
+    create_risk(
+        db_session,
+        data["contract_a"],
+        rule_id="CRITICAL-001",
+        severity="critical",
+        deadline=today + timedelta(days=2),
+    )
+
+    db_session.commit()
+
+    response = api_client.get(
+        f"/api/v1/organizations/"
+        f"{data['organization_a'].id}/risk-prioritization",
+        headers=auth_headers(data["owner_a"]),
+    )
+
+    assert response.status_code == 200
+
+    result = response.json()
+
+    assert result["total_open_risks"] == 2
+
+    risks = result["prioritized_risks"]
+
+    assert risks[0]["severity"] == "critical"
+    assert risks[1]["severity"] == "low"
+
+
+def test_risk_prioritization_identifies_overdue_risks(
+    api_client,
+    db_session,
+    contract_api_data,
+):
+    data = contract_api_data
+
+    create_risk(
+        db_session,
+        data["contract_a"],
+        rule_id="OVERDUE-001",
+        severity="high",
+        deadline=date.today() - timedelta(days=5),
+    )
+
+    db_session.commit()
+
+    response = api_client.get(
+        f"/api/v1/organizations/"
+        f"{data['organization_a'].id}/risk-prioritization",
+        headers=auth_headers(data["owner_a"]),
+    )
+
+    assert response.status_code == 200
+
+    result = response.json()
+
+    assert result["overdue_count"] == 1
+
+    risk = result["prioritized_risks"][0]
+
+    assert risk["urgency"] == "overdue"
+    assert risk["days_until_deadline"] == -5
+
+
+def test_high_impact_low_confidence_risk_is_flagged(
+    api_client,
+    db_session,
+    contract_api_data,
+):
+    data = contract_api_data
+
+    create_risk(
+        db_session,
+        data["contract_a"],
+        rule_id="UNCERTAIN-001",
+        severity="critical",
+        assessment_status="provisional",
+    )
+
+    db_session.commit()
+
+    response = api_client.get(
+        f"/api/v1/organizations/"
+        f"{data['organization_a'].id}/risk-prioritization",
+        headers=auth_headers(data["owner_a"]),
+    )
+
+    assert response.status_code == 200
+
+    result = response.json()
+
+    assert result["high_impact_low_confidence_count"] == 1
+
+    risk = result["prioritized_risks"][0]
+
+    assert (
+        "high_impact_low_confidence"
+        in risk["attention_flags"]
+    )
+
+
+def test_prioritization_excludes_resolved_risks(
+    api_client,
+    db_session,
+    contract_api_data,
+):
+    data = contract_api_data
+
+    create_risk(
+        db_session,
+        data["contract_a"],
+        rule_id="OPEN-001",
+        severity="high",
+    )
+
+    create_risk(
+        db_session,
+        data["contract_a"],
+        rule_id="RESOLVED-001",
+        severity="critical",
+        status="resolved",
+    )
+
+    db_session.commit()
+
+    response = api_client.get(
+        f"/api/v1/organizations/"
+        f"{data['organization_a'].id}/risk-prioritization",
+        headers=auth_headers(data["owner_a"]),
+    )
+
+    assert response.status_code == 200
+
+    result = response.json()
+
+    assert result["total_open_risks"] == 1
+
+
+def test_organization_cannot_access_another_organizations_priorities(
+    api_client,
+    db_session,
+    contract_api_data,
+):
+    data = contract_api_data
+
+    create_risk(
+        db_session,
+        data["contract_b"],
+        rule_id="B-001",
+        severity="critical",
+    )
+
+    db_session.commit()
+
+    response = api_client.get(
+        f"/api/v1/organizations/"
+        f"{data['organization_b'].id}/risk-prioritization",
+        headers=auth_headers(data["owner_a"]),
+    )
+
+    assert response.status_code == 404

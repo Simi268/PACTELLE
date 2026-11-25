@@ -20,6 +20,18 @@ from app.models.risk_finding_evidence import RiskFindingEvidence
 from app.schemas.risk_scoring import RiskScoreResponse
 from app.services.risk_scoring import calculate_risk_score
 
+from sqlalchemy.orm import joinedload
+
+from app.models.risk_finding_evidence import RiskFindingEvidence
+
+from app.services.risk_scoring import calculate_risk_score
+
+from app.services.risk_prioritization import (
+    classify_urgency,
+    identify_attention_flags,
+    build_investigation_recommendation,
+)
+
 
 router = APIRouter(
     prefix="/organizations",
@@ -519,3 +531,120 @@ def get_organization_risk_scores(
     )
 
     return results
+
+# =========================================================
+# 6. ORGANIZATION RISK PRIORITIZATION
+# =========================================================
+
+@router.get("/{organization_id}/risk-prioritization")
+def get_risk_prioritization(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    today = date.today()
+
+    findings = (
+        db.query(RiskFinding, Contract)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .options(
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            )
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+            RiskFinding.status != "resolved",
+        )
+        .all()
+    )
+
+    prioritized = []
+
+    for finding, contract in findings:
+
+        evidence_records = [
+            link.evidence_record
+            for link in finding.evidence_links
+            if link.evidence_record is not None
+        ]
+
+        scoring = calculate_risk_score(
+            finding,
+            evidence_records,
+            today=today,
+        )
+
+        urgency = classify_urgency(
+            finding.deadline_date,
+            today,
+        )
+
+        flags = identify_attention_flags(
+            finding,
+            scoring,
+        )
+
+        recommendation = build_investigation_recommendation(
+            finding,
+            urgency,
+            flags,
+        )
+
+        prioritized.append({
+            "risk_finding_id": str(finding.id),
+            "contract_id": str(contract.id),
+            "contract_title": contract.title,
+            "title": finding.title,
+            "risk_type": finding.risk_type,
+            "severity": finding.severity,
+            "assessment_status": finding.assessment_status,
+            "deadline_date": (
+                finding.deadline_date.isoformat()
+                if finding.deadline_date
+                else None
+            ),
+            "days_until_deadline": (
+                (finding.deadline_date - today).days
+                if finding.deadline_date
+                else None
+            ),
+            "urgency": urgency,
+            "risk_score": scoring["risk_score"],
+            "priority": scoring["priority"],
+            "evidence_confidence": scoring["evidence_confidence"],
+            "attention_flags": flags,
+            "recommendation": recommendation,
+        })
+
+    prioritized.sort(
+        key=lambda item: (
+            item["risk_score"],
+            item["urgency"] == "overdue",
+        ),
+        reverse=True,
+    )
+
+    return {
+        "organization_id": str(organization_id),
+        "generated_on": today.isoformat(),
+        "total_open_risks": len(prioritized),
+        "high_impact_low_confidence_count": sum(
+            "high_impact_low_confidence" in item["attention_flags"]
+            for item in prioritized
+        ),
+        "overdue_count": sum(
+            item["urgency"] == "overdue"
+            for item in prioritized
+        ),
+        "prioritized_risks": prioritized,
+    }
