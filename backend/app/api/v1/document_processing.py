@@ -1,4 +1,5 @@
 from uuid import UUID
+import logging
 
 from fastapi import (
     APIRouter,
@@ -16,6 +17,10 @@ from app.core.dependencies import get_authorized_document
 from app.models.document import ContractDocument
 
 from app.services.document_pipeline import process_document_pipeline
+
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -40,13 +45,51 @@ def start_document_processing(
             detail="Document is already being processed.",
         )
 
-    document.processing_status = "processing"
-    db.commit()
+    previous_status = document.processing_status
 
-    background_tasks.add_task(
-        process_document_pipeline,
-        document_id,
-    )
+    try:
+        document.processing_status = "processing"
+        document.processing_started_at = datetime.now(timezone.utc)
+        db.commit()
+
+        background_tasks.add_task(
+            process_document_pipeline,
+            document_id,
+        )
+
+    except Exception:
+        db.rollback()
+
+        logger.exception(
+            "Could not schedule processing for document %s",
+            document_id,
+        )
+
+        # Restore a retryable state.
+        refreshed_document = (
+            db.query(ContractDocument)
+            .filter(ContractDocument.id == document_id)
+            .first()
+        
+        )
+
+        if refreshed_document is not None:
+            refreshed_document.processing_status = previous_status
+
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Could not restore processing status for %s",
+                    document_id,
+                
+                )
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Document processing could not be scheduled.",
+        )
 
     return {
         "message": "Document processing started.",

@@ -8,7 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     BigInteger,
     func,
-    Uuid
+    Uuid,
 )
 
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -23,61 +23,71 @@ class ContractDocument(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
         primary_key=True,
-        default=uuid.uuid4
+        default=uuid.uuid4,
     )
 
     contract_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("contracts.id", ondelete="CASCADE"),
         nullable=False,
-        index=True
+        index=True,
     )
 
     original_filename: Mapped[str] = mapped_column(
         String(255),
-        nullable=False
+        nullable=False,
     )
 
     stored_filename: Mapped[str] = mapped_column(
         String(255),
         unique=True,
-        nullable=False
+        nullable=False,
     )
 
     storage_path: Mapped[str] = mapped_column(
         String(500),
-        nullable=False
+        nullable=False,
     )
 
     file_type: Mapped[str] = mapped_column(
         String(50),
-        nullable=False
+        nullable=False,
     )
 
     file_size: Mapped[int] = mapped_column(
         BigInteger,
-        nullable=False
+        nullable=False,
     )
 
     processing_status: Mapped[str] = mapped_column(
         String(50),
         default="uploaded",
-        nullable=False
+        nullable=False,
+    )
+
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        nullable=False
+        nullable=False,
     )
 
     contract = relationship(
         "Contract",
-        back_populates="documents"
+        back_populates="documents",
     )
 
     evidence_records = relationship(
         "EvidenceRecord",
         back_populates="document",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
     )

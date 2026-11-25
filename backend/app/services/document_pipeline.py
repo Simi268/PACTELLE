@@ -13,6 +13,8 @@ from app.services.clause_segmenter import segment_clauses
 from app.services.evidence_extractor import extract_evidence_from_clause
 from app.services.risk_engine import detect_automatic_renewal_risk
 
+from datetime import datetime, timezone
+
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +220,7 @@ def process_document_pipeline(document_id):
 
         # Keep processing status visible independently of the main transaction.
         document.processing_status = "processing"
+        document.processing_started_at = datetime.now(timezone.utc)
         db.commit()
 
         file_path = _backend_root() / document.storage_path
@@ -245,6 +248,7 @@ def process_document_pipeline(document_id):
         # Do not destroy existing intelligence if extraction is empty.
         if not extracted_units:
             document.processing_status = "needs_ocr"
+            document.processing_started_at = None
             db.commit()
 
             logger.info(
@@ -319,6 +323,7 @@ def process_document_pipeline(document_id):
 
         if document is not None:
             document.processing_status = "failed"
+            document.processing_started_at = None
             db.commit()
 
     finally:
