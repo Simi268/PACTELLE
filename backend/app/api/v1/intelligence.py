@@ -14,6 +14,12 @@ from app.models.contract import Contract
 from app.models.document import ContractDocument
 from app.models.risk_finding import RiskFinding
 
+from sqlalchemy.orm import joinedload
+
+from app.models.risk_finding_evidence import RiskFindingEvidence
+from app.schemas.risk_scoring import RiskScoreResponse
+from app.services.risk_scoring import calculate_risk_score
+
 
 router = APIRouter(
     prefix="/organizations",
@@ -444,3 +450,72 @@ def get_risk_overview(
             for risk_type, count in risk_type_counts
         },
     }
+
+# =========================================================
+# 5. EVIDENCE-AWARE RISK SCORING
+# =========================================================
+
+@router.get(
+    "/{organization_id}/risk-scores",
+    response_model=list[RiskScoreResponse],
+)
+def get_organization_risk_scores(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    findings = (
+        db.query(RiskFinding)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .options(
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            )
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+            RiskFinding.status != "resolved",
+        )
+        .all()
+    )
+
+    results = []
+
+    for finding in findings:
+
+        evidence_records = [
+            link.evidence_record
+            for link in finding.evidence_links
+            if link.evidence_record is not None
+        ]
+
+        scoring = calculate_risk_score(
+            finding,
+            evidence_records,
+        )
+
+        results.append({
+            "risk_finding_id": str(finding.id),
+            "contract_id": str(finding.contract_id),
+            "title": finding.title,
+            "risk_type": finding.risk_type,
+            "severity": finding.severity,
+            "status": finding.status,
+            **scoring,
+        })
+
+    results.sort(
+        key=lambda item: item["risk_score"],
+        reverse=True,
+    )
+
+    return results
