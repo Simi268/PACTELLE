@@ -13,6 +13,8 @@ from app.models.risk_finding_evidence import RiskFindingEvidence
 
 from app.models.document_text import DocumentTextUnit
 
+from app.models.risk_event import RiskEvent
+
 
 RENEWAL_TEXT = (
     "3. Term and Automatic Renewal\n"
@@ -721,3 +723,154 @@ def test_risk_failure_rolls_back_all_intelligence_changes(
     )
 
     assert refreshed_document.processing_status == "failed"
+
+def test_reprocessing_preserves_historical_evidence_snapshot(
+    monkeypatch,
+    tmp_path,
+    db_session,
+    contract_api_data,
+):
+    document = contract_api_data["document_a"]
+    contract = contract_api_data["contract_a"]
+
+    # Give the contract an expiration date so renewal
+    # risk detection can run.
+    contract.expiration_date = date(2027, 1, 31)
+    db_session.commit()
+
+    original_text = RENEWAL_TEXT
+
+    configure_pipeline(
+        monkeypatch,
+        db_session,
+        tmp_path,
+        [
+            {
+                "unit_index": 0,
+                "page_number": 1,
+                "text": original_text,
+            }
+        ],
+    )
+
+    create_test_file(document, tmp_path)
+
+    # FIRST PROCESSING: create initial evidence and risk.
+    pipeline.process_document_pipeline(document.id)
+
+    db_session.expire_all()
+
+    original_evidence = get_evidence_records(
+        db_session,
+        document.id,
+    )
+
+    assert len(original_evidence) == 2
+
+    original_notice = next(
+        record
+        for record in original_evidence
+        if record.evidence_type == "renewal_notice"
+    )
+
+    original_notice_text = original_notice.evidence_text
+    original_notice_id = original_notice.id
+
+    original_finding = (
+        db_session.query(RiskFinding)
+        .filter(
+            RiskFinding.contract_id == contract.id,
+            RiskFinding.status != "resolved",
+        )
+        .one_or_none()
+    )
+
+    assert original_finding is not None
+
+    # SECOND PROCESSING: change the renewal notice.
+    updated_text = original_text.replace(
+        "thirty (30) days",
+        "sixty (60) days",
+    )
+
+    configure_pipeline(
+        monkeypatch,
+        db_session,
+        tmp_path,
+        [
+            {
+                "unit_index": 0,
+                "page_number": 1,
+                "text": updated_text,
+            }
+        ],
+    )
+
+    pipeline.process_document_pipeline(document.id)
+
+    db_session.expire_all()
+
+    # Confirm that the current evidence contains the update.
+    updated_evidence = get_evidence_records(
+        db_session,
+        document.id,
+    )
+
+    updated_notice = next(
+        record
+        for record in updated_evidence
+        if record.evidence_type == "renewal_notice"
+    )
+
+    assert "sixty (60) days" in updated_notice.evidence_text
+
+    # The old evidence record should have been replaced.
+    assert updated_notice.id != original_notice_id
+
+    # Retrieve the historical evidence-change event.
+    evidence_event = (
+        db_session.query(RiskEvent)
+        .filter(
+            RiskEvent.contract_id == contract.id,
+            RiskEvent.event_type == "evidence_changed",
+            RiskEvent.source == "document_processing",
+        )
+        .order_by(RiskEvent.created_at.desc())
+        .first()
+    )
+
+    assert evidence_event is not None
+
+    # Verify the event retained the original evidence.
+    assert evidence_event.previous_state is not None
+    assert evidence_event.new_state is not None
+
+    assert evidence_event.evidence_snapshot is not None
+
+    historical_snapshot = evidence_event.evidence_snapshot
+
+    assert "previous" in historical_snapshot
+    assert "current" in historical_snapshot
+
+    previous_snapshot = historical_snapshot["previous"]
+    current_snapshot = historical_snapshot["current"]
+
+    # The original evidence must remain available in the event history.
+    assert any(
+        original_notice_text == item["evidence_text"]
+        for item in previous_snapshot
+    )
+
+    assert any(
+        "thirty (30) days" in item["evidence_text"]
+        for item in previous_snapshot
+    )
+
+    # The updated evidence must be recorded separately.
+    assert any(
+        "sixty (60) days" in item["evidence_text"]
+        for item in current_snapshot
+    )
+
+    # Verify the event is associated with the original risk.
+    assert evidence_event.risk_finding_id == original_finding.id
