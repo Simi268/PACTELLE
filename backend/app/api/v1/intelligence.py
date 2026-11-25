@@ -49,6 +49,15 @@ from app.schemas.risk_event import (
     RiskEventTimelineResponse,
 )
 
+from app.models.risk_event import RiskEvent
+
+from app.schemas.risk_investigation import (
+    RiskInvestigationResponse,
+)
+
+from app.services.risk_investigation import (
+    reconstruct_investigation,
+)
 router = APIRouter(
     prefix="/organizations",
     tags=["Organization Intelligence"],
@@ -816,4 +825,84 @@ def get_risk_event_timeline(
         page_size=page_size,
         total_pages=total_pages,
         events=events,
+    )
+
+# =========================================================
+# 9. RISK INVESTIGATION INTELLIGENCE
+# =========================================================
+
+@router.get(
+    "/{organization_id}/risk-findings/{risk_finding_id}/investigation",
+    response_model=RiskInvestigationResponse,
+)
+def get_risk_investigation(
+    organization_id: UUID,
+    risk_finding_id: UUID,
+
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+
+    db: Session = Depends(get_db),
+):
+    """
+    Reconstruct the complete historical investigation of a risk.
+    """
+
+    _verify_organization(organization_id, db)
+
+    # Retrieve only findings belonging to this organization.
+    finding = (
+        db.query(RiskFinding)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .options(
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            ).joinedload(
+                EvidenceRecord.clause
+            ),
+
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            ).joinedload(
+                EvidenceRecord.document
+            ),
+        )
+        .filter(
+            RiskFinding.id == risk_finding_id,
+            Contract.organization_id == organization_id,
+        )
+        .first()
+    )
+
+    if finding is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Risk finding not found.",
+        )
+
+    # Retrieve historical events for this finding.
+    events = (
+        db.query(RiskEvent)
+        .filter(
+            RiskEvent.risk_finding_id == risk_finding_id,
+            RiskEvent.contract_id == finding.contract_id,
+        )
+        .order_by(
+            RiskEvent.created_at.asc(),
+            RiskEvent.id.asc(),
+        )
+        .all()
+    )
+
+    return reconstruct_investigation(
+        finding,
+        events,
     )
