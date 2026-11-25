@@ -42,6 +42,13 @@ from app.services.risk_explanation import explain_risk_finding
 
 from app.models.evidence_record import EvidenceRecord
 
+from app.models.risk_event import RiskEvent
+
+from app.schemas.risk_event import (
+    RiskEventResponse,
+    RiskEventTimelineResponse,
+)
+
 router = APIRouter(
     prefix="/organizations",
     tags=["Organization Intelligence"],
@@ -712,3 +719,101 @@ def get_risk_explanation(
         )
 
     return explain_risk_finding(finding)
+
+# =========================================================
+# 8. RISK INTELLIGENCE TIMELINE
+# =========================================================
+
+@router.get(
+    "/{organization_id}/risk-events",
+    response_model=RiskEventTimelineResponse,
+)
+def get_risk_event_timeline(
+    organization_id: UUID,
+
+    contract_id: UUID | None = None,
+    risk_finding_id: UUID | None = None,
+    event_type: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=50,
+    ),
+
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieve the chronological history of risk intelligence events
+    belonging to an organization.
+    """
+
+    _verify_organization(organization_id, db)
+
+    # Base query is always scoped to the user's organization.
+    query = (
+        db.query(RiskEvent)
+        .join(
+            Contract,
+            Contract.id == RiskEvent.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+        )
+    )
+
+    # Optional contract filter.
+    if contract_id is not None:
+        query = query.filter(
+            RiskEvent.contract_id == contract_id,
+        )
+
+    # Optional risk finding filter.
+    if risk_finding_id is not None:
+        query = query.filter(
+            RiskEvent.risk_finding_id == risk_finding_id,
+        )
+
+    # Optional event type filter.
+    if event_type is not None:
+        query = query.filter(
+            RiskEvent.event_type == event_type.strip(),
+        )
+
+    # Calculate total before pagination.
+    total = query.count()
+
+    # Calculate pagination metadata.
+    total_pages = (
+        (total + page_size - 1) // page_size
+        if total > 0
+        else 0
+    )
+
+    offset = (page - 1) * page_size
+
+    # Newest events first, with deterministic tie-breaking.
+    events = (
+        query
+        .order_by(
+            RiskEvent.created_at.desc(),
+            RiskEvent.id.desc(),
+        )
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+
+    return RiskEventTimelineResponse(
+        organization_id=organization_id,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        events=events,
+    )
