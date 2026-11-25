@@ -1,8 +1,6 @@
 from pathlib import Path
 import logging
 
-from sqlalchemy.orm import Session
-
 from app.core.database import SessionLocal
 
 from app.models.document import ContractDocument
@@ -82,9 +80,7 @@ def _replace_text_units(db, document_id, extracted_units):
 def _replace_clauses(db, document_id):
     units = (
         db.query(DocumentTextUnit)
-        .filter(
-            DocumentTextUnit.document_id == document_id
-        )
+        .filter(DocumentTextUnit.document_id == document_id)
         .order_by(DocumentTextUnit.unit_index.asc())
         .all()
     )
@@ -96,19 +92,14 @@ def _replace_clauses(db, document_id):
             text=unit.extracted_text,
             page_number=unit.page_number or 1,
         )
-
         clause_data.extend(results)
 
     if not clause_data:
-        raise ValueError(
-            "No contractual clauses could be identified."
-        )
+        raise ValueError("No contractual clauses could be identified.")
 
     existing_clauses = (
         db.query(ContractClause)
-        .filter(
-            ContractClause.document_id == document_id
-        )
+        .filter(ContractClause.document_id == document_id)
         .all()
     )
 
@@ -122,7 +113,6 @@ def _replace_clauses(db, document_id):
 
     for item in clause_data:
         clause_number = item["clause_number"]
-
         existing = existing_by_number.get(clause_number)
 
         if existing:
@@ -142,15 +132,9 @@ def _replace_clauses(db, document_id):
         retained_ids.add(clause.id)
         updated_clauses.append(clause)
 
-    # Delete only clauses no longer present.
-    stale_clauses = [
-        clause
-        for clause in existing_clauses
-        if clause.id not in retained_ids
-    ]
-
-    for clause in stale_clauses:
-        db.delete(clause)
+    for clause in existing_clauses:
+        if clause.id not in retained_ids:
+            db.delete(clause)
 
     db.flush()
 
@@ -170,20 +154,11 @@ def _replace_evidence(
         extracted_items = extract_evidence_from_clause(clause)
 
         for item in extracted_items:
-            key = _evidence_key({
-                "evidence_type": item["evidence_type"],
-                "claim": item["claim"],
-                "evidence_text": item["evidence_text"],
-                "page_number": item.get("page_number"),
-                "char_start": item.get("char_start"),
-                "char_end": item.get("char_end"),
-            })
-
+            key = _evidence_key(item)
             previous = previous_evidence.get(key)
 
             if previous:
                 record = previous["record"]
-
                 previous_status = previous["verification_status"]
 
                 record.clause_id = clause.id
@@ -192,16 +167,16 @@ def _replace_evidence(
                     if field == "verification_status":
                         continue
 
-                setattr(record, field, value)
-  
+                    setattr(record, field, value)
+
                 record.verification_status = previous_status
+
             else:
                 record = EvidenceRecord(
                     document_id=document_id,
-                      clause_id=clause.id,
-                      **item,
-                      )
-
+                    clause_id=clause.id,
+                    **item,
+                )
                 db.add(record)
 
             db.flush()
@@ -209,7 +184,6 @@ def _replace_evidence(
             retained_ids.add(record.id)
             created_records.append(record)
 
-    # Remove only evidence no longer extracted from the document.
     for previous in previous_evidence.values():
         record = previous["record"]
 
@@ -223,10 +197,10 @@ def _replace_evidence(
 
 def process_document_pipeline(document_id):
     """
-    Runs the full document intelligence pipeline.
+    Runs the document intelligence pipeline in an independent session.
 
-    Uses its own session because it executes independently
-    of the original HTTP request.
+    All intelligence updates are committed together. If processing fails,
+    previous intelligence data is restored through transaction rollback.
     """
 
     db = SessionLocal()
@@ -234,28 +208,22 @@ def process_document_pipeline(document_id):
     try:
         document = (
             db.query(ContractDocument)
-            .filter(
-                ContractDocument.id == document_id
-            )
+            .filter(ContractDocument.id == document_id)
             .first()
         )
 
         if document is None:
-            logger.error(
-                "Document %s not found.",
-                document_id,
-            )
+            logger.error("Document %s not found.", document_id)
             return
 
+        # Keep processing status visible independently of the main transaction.
         document.processing_status = "processing"
         db.commit()
 
         file_path = _backend_root() / document.storage_path
 
         if not file_path.is_file():
-            raise FileNotFoundError(
-                "Stored document file not found."
-            )
+            raise FileNotFoundError("Stored document file not found.")
 
         previous_evidence = _get_existing_verifications(
             db,
@@ -274,6 +242,7 @@ def process_document_pipeline(document_id):
             if unit.get("text", "").strip()
         ]
 
+        # Do not destroy existing intelligence if extraction is empty.
         if not extracted_units:
             document.processing_status = "needs_ocr"
             db.commit()
@@ -284,23 +253,20 @@ def process_document_pipeline(document_id):
             )
             return
 
+        # STEP 2: Replace text units.
         _replace_text_units(
             db,
             document_id,
             extracted_units,
         )
 
-        db.commit()
-
-        # STEP 2: Update clauses.
+        # STEP 3: Reconcile clauses.
         clauses = _replace_clauses(
             db,
             document_id,
         )
 
-        db.commit()
-
-        # STEP 3: Update evidence.
+        # STEP 4: Reconcile evidence.
         evidence_records = _replace_evidence(
             db,
             document_id,
@@ -308,25 +274,16 @@ def process_document_pipeline(document_id):
             previous_evidence,
         )
 
-        db.commit()
-
-        # STEP 4: Reconcile renewal risk.
+        # STEP 5: Reconcile risk in the same transaction.
         contract_id = document.contract_id
 
         risk_result = detect_automatic_renewal_risk(
             db,
             contract_id,
+            commit=False,
         )
 
-        # STEP 5: Mark completed.
-        document = (
-            db.query(ContractDocument)
-            .filter(
-                ContractDocument.id == document_id
-            )
-            .first()
-        )
-
+        # STEP 6: Mark completed and commit everything together.
         document.processing_status = "completed"
         db.commit()
 
@@ -345,6 +302,7 @@ def process_document_pipeline(document_id):
         }
 
     except Exception:
+        # Roll back all intelligence changes from this processing attempt.
         db.rollback()
 
         logger.exception(
@@ -352,11 +310,10 @@ def process_document_pipeline(document_id):
             document_id,
         )
 
+        # Record failure separately after rollback.
         document = (
             db.query(ContractDocument)
-            .filter(
-                ContractDocument.id == document_id
-            )
+            .filter(ContractDocument.id == document_id)
             .first()
         )
 

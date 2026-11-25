@@ -66,10 +66,18 @@ def _sync_evidence_links(db, finding, supporting_evidence):
             )
 
 
-def _reconcile_incomplete_finding(db, finding, reason):
+def _reconcile_incomplete_finding(
+    db,
+    finding,
+    reason,
+    commit=True,
+):
     """
     Keep an existing finding open, but downgrade its assessment
     when its supporting evidence is incomplete or invalid.
+
+    When commit=False, changes remain part of the caller's
+    transaction.
     """
 
     if finding is None:
@@ -87,8 +95,9 @@ def _reconcile_incomplete_finding(db, finding, reason):
         supporting_evidence=[],
     )
 
-    db.commit()
-    db.refresh(finding)
+    if commit:
+        db.commit()
+        db.refresh(finding)
 
     return {
         "status": "reconciled",
@@ -101,6 +110,7 @@ def _reconcile_incomplete_finding(db, finding, reason):
 def detect_automatic_renewal_risk(
     db: Session,
     contract_id,
+    commit=True,
 ):
     """
     Detect automatic renewal exposure using contractual evidence.
@@ -111,6 +121,12 @@ def detect_automatic_renewal_risk(
 
     A missing or rejected evidence record does not automatically
     resolve an existing risk finding.
+
+    commit=True:
+        Commits changes independently (default behavior).
+
+    commit=False:
+        Leaves transaction management to the caller.
     """
 
     contract = (
@@ -129,6 +145,7 @@ def detect_automatic_renewal_risk(
             db,
             existing_finding,
             "Contract expiration date is missing.",
+            commit=commit,
         )
 
     documents = (
@@ -149,6 +166,7 @@ def detect_automatic_renewal_risk(
             db,
             existing_finding,
             "No contract documents found.",
+            commit=commit,
         )
 
     evidence_records = (
@@ -181,6 +199,7 @@ def detect_automatic_renewal_risk(
             db,
             existing_finding,
             "Required renewal evidence is incomplete.",
+            commit=commit,
         )
 
     # Prefer verified evidence.
@@ -220,6 +239,7 @@ def detect_automatic_renewal_risk(
             db,
             existing_finding,
             "Could not determine the notice period.",
+            commit=commit,
         )
 
     deadline = (
@@ -237,8 +257,9 @@ def detect_automatic_renewal_risk(
             supporting_evidence,
         )
 
-        db.commit()
-        db.refresh(existing_finding)
+        if commit:
+            db.commit()
+            db.refresh(existing_finding)
 
         return {
             "status": "already_exists",
@@ -278,8 +299,9 @@ def detect_automatic_renewal_risk(
         supporting_evidence,
     )
 
-    db.commit()
-    db.refresh(finding)
+    if commit:
+        db.commit()
+        db.refresh(finding)
 
     return {
         "status": "created",

@@ -11,6 +11,8 @@ from app.models.evidence_record import EvidenceRecord
 from app.models.risk_finding import RiskFinding
 from app.models.risk_finding_evidence import RiskFindingEvidence
 
+from app.models.document_text import DocumentTextUnit
+
 
 RENEWAL_TEXT = (
     "3. Term and Automatic Renewal\n"
@@ -429,5 +431,293 @@ def test_extraction_failure_preserves_existing_evidence(
     ).filter(
         ContractDocument.id == document.id
     ).one()
+
+    assert refreshed_document.processing_status == "failed"
+
+def test_risk_failure_rolls_back_all_intelligence_changes(
+    monkeypatch,
+    tmp_path,
+    db_session,
+    contract_api_data,
+):
+    document = contract_api_data["document_a"]
+    contract = contract_api_data["contract_a"]
+
+    # STEP 1: Process the document successfully.
+    configure_pipeline(
+        monkeypatch,
+        db_session,
+        tmp_path,
+        [
+            {
+                "unit_index": 0,
+                "page_number": 1,
+                "text": RENEWAL_TEXT,
+            }
+        ],
+    )
+
+    create_test_file(document, tmp_path)
+
+    pipeline.process_document_pipeline(document.id)
+
+    db_session.expire_all()
+
+    # STEP 2: Capture the original text units.
+    original_units = (
+        db_session.query(DocumentTextUnit)
+        .filter(
+            DocumentTextUnit.document_id == document.id
+        )
+        .order_by(DocumentTextUnit.unit_index)
+        .all()
+    )
+
+    original_text = [
+        (
+            unit.unit_index,
+            unit.page_number,
+            unit.extracted_text,
+            unit.character_count,
+        )
+        for unit in original_units
+    ]
+
+    # STEP 3: Capture original clauses.
+    original_clauses = (
+        db_session.query(ContractClause)
+        .filter(
+            ContractClause.document_id == document.id
+        )
+        .order_by(ContractClause.clause_number)
+        .all()
+    )
+
+    original_clause_data = [
+        (
+            clause.id,
+            clause.clause_number,
+            clause.clause_title,
+            clause.source_text,
+        )
+        for clause in original_clauses
+    ]
+
+    # STEP 4: Capture original evidence.
+    original_evidence = get_evidence_records(
+        db_session,
+        document.id,
+    )
+
+    original_evidence_data = {
+        record.id: (
+            record.evidence_type,
+            record.claim,
+            record.evidence_text,
+            record.verification_status,
+            record.clause_id,
+        )
+        for record in original_evidence
+    }
+
+    assert len(original_evidence_data) == 2
+
+    # STEP 5: Capture existing risk findings and evidence links.
+    original_findings = (
+        db_session.query(RiskFinding)
+        .filter(
+            RiskFinding.contract_id == contract.id
+        )
+        .all()
+    )
+
+    original_finding_data = {
+        finding.id: (
+            finding.status,
+            finding.assessment_status,
+            finding.deadline_date,
+            finding.confidence,
+        )
+        for finding in original_findings
+    }
+
+    original_links = {
+        (
+            link.risk_finding_id,
+            link.evidence_record_id,
+        )
+        for link in (
+            db_session.query(RiskFindingEvidence)
+            .join(
+                EvidenceRecord,
+                EvidenceRecord.id
+                == RiskFindingEvidence.evidence_record_id,
+            )
+            .filter(
+                EvidenceRecord.document_id == document.id
+            )
+            .all()
+        )
+    }
+
+    # STEP 6: Change the extracted document content.
+    configure_pipeline(
+        monkeypatch,
+        db_session,
+        tmp_path,
+        [
+            {
+                "unit_index": 0,
+                "page_number": 1,
+                "text": SERVICES_TEXT,
+            }
+        ],
+    )
+
+    # STEP 7: Let risk detection execute, then force failure.
+    original_risk_detection = (
+        pipeline.detect_automatic_renewal_risk
+    )
+
+    def failing_risk_detection(
+        db,
+        contract_id,
+        commit=True,
+    ):
+        original_risk_detection(
+            db,
+            contract_id,
+            commit=False,
+        )
+
+        raise RuntimeError(
+            "Simulated failure after risk reconciliation"
+        )
+
+    monkeypatch.setattr(
+        pipeline,
+        "detect_automatic_renewal_risk",
+        failing_risk_detection,
+    )
+
+    # STEP 8: Run the failed reprocessing attempt.
+    pipeline.process_document_pipeline(document.id)
+
+    db_session.expire_all()
+
+    # STEP 9: Verify original text units survived.
+    remaining_units = (
+        db_session.query(DocumentTextUnit)
+        .filter(
+            DocumentTextUnit.document_id == document.id
+        )
+        .order_by(DocumentTextUnit.unit_index)
+        .all()
+    )
+
+    remaining_text = [
+        (
+            unit.unit_index,
+            unit.page_number,
+            unit.extracted_text,
+            unit.character_count,
+        )
+        for unit in remaining_units
+    ]
+
+    assert remaining_text == original_text
+
+    # STEP 10: Verify original clauses survived.
+    remaining_clauses = (
+        db_session.query(ContractClause)
+        .filter(
+            ContractClause.document_id == document.id
+        )
+        .order_by(ContractClause.clause_number)
+        .all()
+    )
+
+    remaining_clause_data = [
+        (
+            clause.id,
+            clause.clause_number,
+            clause.clause_title,
+            clause.source_text,
+        )
+        for clause in remaining_clauses
+    ]
+
+    assert remaining_clause_data == original_clause_data
+
+    # STEP 11: Verify original evidence survived.
+    remaining_evidence = get_evidence_records(
+        db_session,
+        document.id,
+    )
+
+    remaining_evidence_data = {
+        record.id: (
+            record.evidence_type,
+            record.claim,
+            record.evidence_text,
+            record.verification_status,
+            record.clause_id,
+        )
+        for record in remaining_evidence
+    }
+
+    assert remaining_evidence_data == original_evidence_data
+
+    # STEP 12: Verify risk findings survived.
+    remaining_findings = (
+        db_session.query(RiskFinding)
+        .filter(
+            RiskFinding.contract_id == contract.id
+        )
+        .all()
+    )
+
+    remaining_finding_data = {
+        finding.id: (
+            finding.status,
+            finding.assessment_status,
+            finding.deadline_date,
+            finding.confidence,
+        )
+        for finding in remaining_findings
+    }
+
+    assert remaining_finding_data == original_finding_data
+
+    # STEP 13: Verify evidence links survived.
+    remaining_links = {
+        (
+            link.risk_finding_id,
+            link.evidence_record_id,
+        )
+        for link in (
+            db_session.query(RiskFindingEvidence)
+            .join(
+                EvidenceRecord,
+                EvidenceRecord.id
+                == RiskFindingEvidence.evidence_record_id,
+            )
+            .filter(
+                EvidenceRecord.document_id == document.id
+            )
+            .all()
+        )
+    }
+
+    assert remaining_links == original_links
+
+    # STEP 14: Only processing status should change.
+    refreshed_document = (
+        db_session.query(ContractDocument)
+        .filter(
+            ContractDocument.id == document.id
+        )
+        .one()
+    )
 
     assert refreshed_document.processing_status == "failed"
