@@ -2,7 +2,8 @@ from math import ceil
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
 from app.core.dependencies import require_organization_role
@@ -23,6 +24,11 @@ from app.schemas.portfolio_finding import (
     PortfolioFindingListResponse,
     PortfolioFindingResponse,
     PortfolioFindingStatusUpdate,
+    PortfolioAnalysisResponse,
+    PortfolioEvolutionResponse,
+    PortfolioSnapshotListResponse,
+    PortfolioSnapshotDetailResponse,
+    PortfolioRiskTrendResponse,
 )
 
 from app.services.portfolio_finding_service import (
@@ -30,10 +36,16 @@ from app.services.portfolio_finding_service import (
     PortfolioFindingNotFoundError,
     update_portfolio_finding_status,
 )
-from sqlalchemy.exc import SQLAlchemyError
+from app.services.portfolio_analysis_service import (
+    run_organization_portfolio_analysis,
+)
 from app.services.portfolio_evolution import (
     compare_portfolio_snapshots,
     PortfolioEvolutionError,
+)
+from app.services.portfolio_trend_engine import (
+    analyze_portfolio_risk_trends,
+    PortfolioTrendError,
 )
 
 
@@ -138,18 +150,14 @@ def _serialize_finding(finding):
 )
 def list_portfolio_findings(
     organization_id: UUID,
-
     finding_type: str | None = Query(default=None),
     severity: str | None = Query(default=None),
     status: str | None = Query(default=None),
-
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
-
     membership: OrganizationMembership = Depends(
         require_organization_role("owner", "admin", "member")
     ),
-
     db: Session = Depends(get_db),
 ):
     valid_types = {
@@ -226,11 +234,9 @@ def list_portfolio_findings(
 def get_portfolio_finding(
     organization_id: UUID,
     finding_id: UUID,
-
     membership: OrganizationMembership = Depends(
         require_organization_role("owner", "admin", "member")
     ),
-
     db: Session = Depends(get_db),
 ):
     finding = (
@@ -260,11 +266,9 @@ def update_portfolio_finding(
     organization_id: UUID,
     finding_id: UUID,
     request: PortfolioFindingStatusUpdate,
-
     membership: OrganizationMembership = Depends(
         require_organization_role("owner", "admin")
     ),
-
     db: Session = Depends(get_db),
 ):
     try:
@@ -296,16 +300,7 @@ def update_portfolio_finding(
 
     return _serialize_finding(finding)
 
-from app.schemas.portfolio_finding import (
-    PortfolioFindingListResponse,
-    PortfolioFindingResponse,
-    PortfolioFindingStatusUpdate,
-    PortfolioAnalysisResponse,
-)
 
-from app.services.portfolio_analysis_service import (
-    run_organization_portfolio_analysis,
-)
 # =========================================================
 # ORGANIZATION PORTFOLIO ANALYSIS
 # =========================================================
@@ -316,11 +311,9 @@ from app.services.portfolio_analysis_service import (
 )
 def analyze_portfolio(
     organization_id: UUID,
-
     membership: OrganizationMembership = Depends(
         require_organization_role("owner", "admin")
     ),
-
     db: Session = Depends(get_db),
 ):
     """
@@ -331,7 +324,8 @@ def analyze_portfolio(
         2. Analyze cross-contract relationships.
         3. Generate potential risk findings.
         4. Persist findings with duplicate protection.
-        5. Return findings requiring human review.
+        5. Persist an immutable analysis snapshot.
+        6. Return findings requiring human review.
 
     Only organization owners and administrators can
     trigger portfolio analysis.
@@ -371,24 +365,19 @@ def analyze_portfolio(
         return {
             "organization_id": organization_id,
             "status": "completed",
-
             "summary": {
                 "retrieval": result["retrieval"],
                 "intelligence": result["intelligence"],
                 "generation": result["generation"],
                 "persistence": result["persistence"],
+                "snapshot": result.get("snapshot", {}),
             },
-
             "findings": findings,
-
-            "human_review_queue": result[
-                "human_review_queue"
-            ],
+            "human_review_queue": result["human_review_queue"],
         }
 
     except PortfolioFindingValidationError as exc:
         db.rollback()
-
         raise HTTPException(
             status_code=422,
             detail=str(exc),
@@ -396,24 +385,12 @@ def analyze_portfolio(
 
     except SQLAlchemyError:
         db.rollback()
-
         raise HTTPException(
             status_code=500,
             detail="Portfolio analysis could not be completed.",
         )
 
-    from app.models.portfolio_analysis_snapshot import (
-    PortfolioAnalysisSnapshot,
-)
 
-from app.schemas.portfolio_finding import (
-    PortfolioEvolutionResponse,
-)
-
-from app.services.portfolio_evolution import (
-    compare_portfolio_snapshots,
-    PortfolioEvolutionError,
-)
 # =========================================================
 # PORTFOLIO RISK EVOLUTION
 # =========================================================
@@ -424,24 +401,16 @@ from app.services.portfolio_evolution import (
 )
 def get_portfolio_evolution(
     organization_id: UUID,
-
     membership: OrganizationMembership = Depends(
         require_organization_role("owner", "admin", "member")
     ),
-
     db: Session = Depends(get_db),
 ):
     """
     Compare the two most recent portfolio analysis snapshots.
 
-    Identifies:
-        - Newly detected risks.
-        - Persistent risks.
-        - Risks no longer detected.
-        - Severity increases and decreases.
-
-    This endpoint is read-only.
-    It never automatically resolves live findings.
+    This endpoint is read-only and never automatically resolves
+    live portfolio findings.
     """
 
     try:
@@ -468,16 +437,13 @@ def get_portfolio_evolution(
                 ),
             )
 
-        # Query returns newest first.
         current_snapshot = snapshots[0]
         previous_snapshot = snapshots[1]
 
-        result = compare_portfolio_snapshots(
+        return compare_portfolio_snapshots(
             previous_snapshot,
             current_snapshot,
         )
-
-        return result
 
     except PortfolioEvolutionError as exc:
         raise HTTPException(
@@ -489,4 +455,182 @@ def get_portfolio_evolution(
         raise HTTPException(
             status_code=500,
             detail="Portfolio evolution analysis could not be completed.",
+        )
+
+
+# =========================================================
+# PORTFOLIO SNAPSHOT HISTORY
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-snapshots",
+    response_model=PortfolioSnapshotListResponse,
+)
+def list_portfolio_snapshots(
+    organization_id: UUID,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    """Return paginated, newest-first organization snapshot history."""
+
+    query = db.query(PortfolioAnalysisSnapshot).filter(
+        PortfolioAnalysisSnapshot.organization_id == organization_id
+    )
+
+    total = query.count()
+    total_pages = ceil(total / page_size) if total else 0
+
+    snapshots = (
+        query
+        .order_by(
+            PortfolioAnalysisSnapshot.created_at.desc(),
+            PortfolioAnalysisSnapshot.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    return {
+        "organization_id": organization_id,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "snapshots": snapshots,
+    }
+
+
+# =========================================================
+# PORTFOLIO SNAPSHOT DETAIL
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-snapshots/{snapshot_id}",
+    response_model=PortfolioSnapshotDetailResponse,
+)
+def get_portfolio_snapshot(
+    organization_id: UUID,
+    snapshot_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    snapshot = (
+        db.query(PortfolioAnalysisSnapshot)
+        .filter(
+            PortfolioAnalysisSnapshot.id == snapshot_id,
+            PortfolioAnalysisSnapshot.organization_id == organization_id,
+        )
+        .options(
+            selectinload(PortfolioAnalysisSnapshot.findings)
+        )
+        .first()
+    )
+
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Portfolio snapshot not found.",
+        )
+
+    return {
+        "id": snapshot.id,
+        "organization_id": snapshot.organization_id,
+        "analysis_version": snapshot.analysis_version,
+        "total_contracts": snapshot.total_contracts,
+        "total_obligations": snapshot.total_obligations,
+        "total_comparisons": snapshot.total_comparisons,
+        "total_findings": snapshot.total_findings,
+        "summary": snapshot.summary or {},
+        "created_at": snapshot.created_at,
+        "findings": [
+            {
+                "id": finding.id,
+                "snapshot_id": finding.snapshot_id,
+                "portfolio_finding_id": finding.portfolio_finding_id,
+                "rule_id": finding.rule_id,
+                "finding_type": finding.finding_type,
+                "title": finding.title,
+                "description": finding.description,
+                "severity": finding.severity,
+                "status": finding.status,
+                "assessment_status": finding.assessment_status,
+                "details": finding.details,
+                "contract_ids": finding.contract_ids or [],
+                "evidence_ids": finding.evidence_ids or [],
+                "captured_at": finding.captured_at,
+            }
+            for finding in snapshot.findings
+        ],
+    }
+
+
+# =========================================================
+# PORTFOLIO RISK TREND ANALYTICS
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-risk-trends",
+    response_model=PortfolioRiskTrendResponse,
+)
+def get_portfolio_risk_trends(
+    organization_id: UUID,
+    limit: int = Query(default=10, ge=2, le=50),
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Analyze historical portfolio risk trends using immutable snapshots.
+
+    The latest `limit` snapshots are loaded for the requested
+    organization. This endpoint does not modify snapshots or live findings.
+    """
+
+    try:
+        snapshots = (
+            db.query(PortfolioAnalysisSnapshot)
+            .filter(
+                PortfolioAnalysisSnapshot.organization_id
+                == organization_id
+            )
+            .options(
+                selectinload(PortfolioAnalysisSnapshot.findings)
+            )
+            .order_by(
+                PortfolioAnalysisSnapshot.created_at.desc(),
+                PortfolioAnalysisSnapshot.id.desc(),
+            )
+            .limit(limit)
+            .all()
+        )
+
+        if len(snapshots) < 2:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "At least two portfolio analysis snapshots "
+                    "are required to calculate risk trends."
+                ),
+            )
+
+        return analyze_portfolio_risk_trends(snapshots)
+
+    except PortfolioTrendError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        )
+
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Portfolio risk trend analysis could not be completed.",
         )
