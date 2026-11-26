@@ -21,6 +21,9 @@ from app.api.v1.document_processing import (
     router as document_processing_router,
 )
 from app.api.v1.intelligence import router as intelligence_router
+from app.api.v1.portfolio_intelligence import (
+    router as portfolio_intelligence_router,
+)
 
 app = FastAPI(
     title="PACTELLE API",
@@ -61,6 +64,10 @@ app.include_router(
 )
 app.include_router(
     intelligence_router,
+    prefix="/api/v1",
+)
+app.include_router(
+    portfolio_intelligence_router,
     prefix="/api/v1",
 )
 
