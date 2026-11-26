@@ -13,6 +13,9 @@ from app.models.portfolio_risk_finding import (
     PortfolioRiskFindingContract,
     PortfolioRiskFindingEvidence,
 )
+from app.models.portfolio_analysis_snapshot import (
+    PortfolioAnalysisSnapshot,
+)
 from app.models.evidence_record import EvidenceRecord
 from app.models.document import ContractDocument
 
@@ -28,6 +31,10 @@ from app.services.portfolio_finding_service import (
     update_portfolio_finding_status,
 )
 from sqlalchemy.exc import SQLAlchemyError
+from app.services.portfolio_evolution import (
+    compare_portfolio_snapshots,
+    PortfolioEvolutionError,
+)
 
 
 router = APIRouter(
@@ -393,4 +400,93 @@ def analyze_portfolio(
         raise HTTPException(
             status_code=500,
             detail="Portfolio analysis could not be completed.",
+        )
+
+    from app.models.portfolio_analysis_snapshot import (
+    PortfolioAnalysisSnapshot,
+)
+
+from app.schemas.portfolio_finding import (
+    PortfolioEvolutionResponse,
+)
+
+from app.services.portfolio_evolution import (
+    compare_portfolio_snapshots,
+    PortfolioEvolutionError,
+)
+# =========================================================
+# PORTFOLIO RISK EVOLUTION
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-evolution",
+    response_model=PortfolioEvolutionResponse,
+)
+def get_portfolio_evolution(
+    organization_id: UUID,
+
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+
+    db: Session = Depends(get_db),
+):
+    """
+    Compare the two most recent portfolio analysis snapshots.
+
+    Identifies:
+        - Newly detected risks.
+        - Persistent risks.
+        - Risks no longer detected.
+        - Severity increases and decreases.
+
+    This endpoint is read-only.
+    It never automatically resolves live findings.
+    """
+
+    try:
+        snapshots = (
+            db.query(PortfolioAnalysisSnapshot)
+            .filter(
+                PortfolioAnalysisSnapshot.organization_id
+                == organization_id
+            )
+            .order_by(
+                PortfolioAnalysisSnapshot.created_at.desc(),
+                PortfolioAnalysisSnapshot.id.desc(),
+            )
+            .limit(2)
+            .all()
+        )
+
+        if len(snapshots) < 2:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "At least two portfolio analysis snapshots "
+                    "are required to calculate risk evolution."
+                ),
+            )
+
+        # Query returns newest first.
+        current_snapshot = snapshots[0]
+        previous_snapshot = snapshots[1]
+
+        result = compare_portfolio_snapshots(
+            previous_snapshot,
+            current_snapshot,
+        )
+
+        return result
+
+    except PortfolioEvolutionError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        )
+
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Portfolio evolution analysis could not be completed.",
         )

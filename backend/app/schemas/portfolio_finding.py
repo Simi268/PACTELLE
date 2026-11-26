@@ -106,3 +106,17 @@ class PortfolioAnalysisResponse(BaseModel):
 
     findings: list[PortfolioFindingResponse]
     human_review_queue: list[dict[str, Any]]
+
+class PortfolioEvolutionResponse(BaseModel):
+    organization_id: UUID
+
+    previous_snapshot_id: UUID
+    current_snapshot_id: UUID
+
+    previous_snapshot_created_at: datetime
+    current_snapshot_created_at: datetime
+
+    summary: dict[str, int]
+    findings: list[dict[str, Any]]
+
+    human_review_required: bool
