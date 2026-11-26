@@ -1,5 +1,3 @@
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -29,11 +27,16 @@ def extract_document_evidence(
 
     document_id = document.id
 
-    clauses = db.query(ContractClause).filter(
-        ContractClause.document_id == document_id
-    ).order_by(
-        ContractClause.clause_number
-    ).all()
+    clauses = (
+        db.query(ContractClause)
+        .filter(
+            ContractClause.document_id == document_id
+        )
+        .order_by(
+            ContractClause.clause_number
+        )
+        .all()
+    )
 
     if not clauses:
         raise HTTPException(
@@ -43,11 +46,8 @@ def extract_document_evidence(
 
     try:
 
-        db.query(EvidenceRecord).filter(
-            EvidenceRecord.document_id == document_id
-        ).delete(synchronize_session=False)
-
-        all_evidence = []
+        # Extract everything before changing existing records.
+        extracted_records = []
 
         for clause in clauses:
 
@@ -55,20 +55,43 @@ def extract_document_evidence(
 
             for item in extracted:
 
-                evidence = EvidenceRecord(
-                    document_id=document_id,
-                    clause_id=clause.id,
-                    **item
-                )
-
-                db.add(evidence)
-
-                all_evidence.append({
-                    "clause_number": clause.clause_number,
-                    "claim": item["claim"],
-                    "evidence_type": item["evidence_type"],
-                    "page_number": item["page_number"],
+                extracted_records.append({
+                    "clause": clause,
+                    "data": item
                 })
+
+        # Preserve previous evidence records.
+        db.query(EvidenceRecord).filter(
+            EvidenceRecord.document_id == document_id,
+            EvidenceRecord.is_current.is_(True)
+        ).update(
+            {"is_current": False},
+            synchronize_session=False
+        )
+
+        all_evidence = []
+
+        # Insert the new extraction generation.
+        for record in extracted_records:
+
+            clause = record["clause"]
+            item = record["data"]
+
+            evidence = EvidenceRecord(
+                document_id=document_id,
+                clause_id=clause.id,
+                is_current=True,
+                **item
+            )
+
+            db.add(evidence)
+
+            all_evidence.append({
+                "clause_number": clause.clause_number,
+                "claim": item["claim"],
+                "evidence_type": item["evidence_type"],
+                "page_number": item["page_number"],
+            })
 
         db.commit()
 
@@ -77,6 +100,7 @@ def extract_document_evidence(
             "status": "completed",
             "clauses_processed": len(clauses),
             "evidence_records_created": len(all_evidence),
+            "historical_evidence_preserved": True,
             "evidence": all_evidence
         }
 

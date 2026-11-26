@@ -23,8 +23,8 @@ RENEWAL_NOTICE_PATTERN = re.compile(
 
 def split_sentences_with_offsets(text: str):
     """
-    Split contractual text into sentences.
-    Exclude numbered clause headings and preserve exact offsets.
+    Split contractual text into sentences while preserving
+    exact character offsets in the original source text.
     """
 
     sentences = []
@@ -44,34 +44,60 @@ def split_sentences_with_offsets(text: str):
 
     content = text[text_start:]
 
-    # Normalize line breaks for sentence detection.
-    # Preserve the original text and its character positions.
-    normalized_content = re.sub(r"[\r\n]+", " ", content)
+    # Normalize line breaks while retaining original positions.
+    normalized_chars = []
+    original_positions = []
+
+    index = 0
+
+    while index < len(content):
+        char = content[index]
+
+        if char in "\r\n":
+            original_positions.append(text_start + index)
+            normalized_chars.append(" ")
+
+            while (
+                index < len(content)
+                and content[index] in "\r\n"
+            ):
+                index += 1
+
+            continue
+
+        normalized_chars.append(char)
+        original_positions.append(text_start + index)
+        index += 1
+
+    normalized_content = "".join(normalized_chars)
 
     pattern = re.compile(r"[^.!?]+(?:[.!?]+|$)")
 
     for match in pattern.finditer(normalized_content):
 
         raw_sentence = match.group()
-        sentence = raw_sentence.strip()
 
-        if not sentence:
+        left = len(raw_sentence) - len(raw_sentence.lstrip())
+        right = len(raw_sentence.rstrip())
+
+        if left >= right:
             continue
 
-        leading_spaces = (
-            len(raw_sentence) - len(raw_sentence.lstrip())
-        )
+        normalized_start = match.start() + left
+        normalized_end = match.start() + right
 
-        start = text_start + match.start() + leading_spaces
-        end = start + len(sentence)
+        original_start = original_positions[normalized_start]
+        original_end = original_positions[normalized_end - 1] + 1
 
-        # Always retain the exact original source substring.
-        source_sentence = text[start:end]
+        source_sentence = text[original_start:original_end]
+
+        if not source_sentence.strip():
+            continue
 
         sentences.append({
             "text": source_sentence,
-            "start": start,
-            "end": end
+            "start": original_start,
+            "end": original_end,
         })
 
     return sentences

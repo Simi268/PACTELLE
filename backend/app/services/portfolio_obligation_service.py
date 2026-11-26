@@ -18,13 +18,13 @@ def retrieve_organization_obligations(
     organization_id: UUID,
 ) -> dict:
     """
-    Retrieve and normalize contractual obligations
-    across all contracts belonging to an organization.
+    Retrieve current contractual obligations across
+    all contracts belonging to an organization.
 
-    Organization isolation is enforced through SQL joins.
+    Historical evidence is preserved but excluded
+    from new portfolio analysis.
 
-    Rejected evidence is retained separately but excluded
-    from obligation comparison.
+    Rejected current evidence is retained separately.
     """
 
     evidence_records = (
@@ -41,7 +41,8 @@ def retrieve_organization_obligations(
         )
 
         .filter(
-            Contract.organization_id == organization_id
+            Contract.organization_id == organization_id,
+            EvidenceRecord.is_current.is_(True),
         )
 
         .options(
@@ -70,7 +71,6 @@ def retrieve_organization_obligations(
     for evidence in evidence_records:
 
         document = evidence.document
-
         contract = document.contract
 
         obligation = normalize_evidence_record(
@@ -79,15 +79,11 @@ def retrieve_organization_obligations(
             contract_title=contract.title,
         )
 
-        # Ignore evidence types that the normalizer
-        # does not currently support.
         if obligation is None:
 
             unsupported_evidence_count += 1
-
             continue
 
-        # Preserve explicit analysis eligibility.
         obligation["analysis_eligible"] = (
             evidence.verification_status != "rejected"
         )

@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     Float,
+    Boolean,
     CheckConstraint,
     Index,
 )
@@ -93,6 +94,15 @@ class EvidenceRecord(Base):
         default="unverified"
     )
 
+    # True = latest extraction.
+    # False = preserved historical extraction.
+    is_current = Column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true"
+    )
+
     created_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -139,6 +149,12 @@ class EvidenceRecord(Base):
         Index(
             "ix_evidence_records_evidence_type",
             "evidence_type"
+        ),
+
+        Index(
+            "ix_evidence_document_current",
+            "document_id",
+            "is_current"
         ),
     )
 
