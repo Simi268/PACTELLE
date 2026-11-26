@@ -19,3 +19,7 @@ from app.models.portfolio_analysis_snapshot import (
     PortfolioAnalysisSnapshot,
     PortfolioAnalysisSnapshotFinding,
 )
+from app.models.portfolio_risk_action import (
+    PortfolioRiskAction,
+    PortfolioRiskActionAudit,
+)
