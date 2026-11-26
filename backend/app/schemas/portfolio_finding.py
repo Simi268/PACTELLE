@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -89,3 +90,19 @@ class PortfolioFindingListResponse(BaseModel):
     total_pages: int
 
     findings: list[PortfolioFindingResponse]
+
+class PortfolioAnalysisSummary(BaseModel):
+    retrieval: dict[str, Any]
+    intelligence: dict[str, Any]
+    generation: dict[str, Any]
+    persistence: dict[str, int]
+
+
+class PortfolioAnalysisResponse(BaseModel):
+    organization_id: UUID
+    status: Literal["completed"]
+
+    summary: PortfolioAnalysisSummary
+
+    findings: list[PortfolioFindingResponse]
+    human_review_queue: list[dict[str, Any]]

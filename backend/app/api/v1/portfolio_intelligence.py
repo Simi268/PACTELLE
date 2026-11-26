@@ -27,6 +27,7 @@ from app.services.portfolio_finding_service import (
     PortfolioFindingNotFoundError,
     update_portfolio_finding_status,
 )
+from sqlalchemy.exc import SQLAlchemyError
 
 
 router = APIRouter(
@@ -287,3 +288,109 @@ def update_portfolio_finding(
     )
 
     return _serialize_finding(finding)
+
+from app.schemas.portfolio_finding import (
+    PortfolioFindingListResponse,
+    PortfolioFindingResponse,
+    PortfolioFindingStatusUpdate,
+    PortfolioAnalysisResponse,
+)
+
+from app.services.portfolio_analysis_service import (
+    run_organization_portfolio_analysis,
+)
+# =========================================================
+# ORGANIZATION PORTFOLIO ANALYSIS
+# =========================================================
+
+@router.post(
+    "/{organization_id}/portfolio-analysis",
+    response_model=PortfolioAnalysisResponse,
+)
+def analyze_portfolio(
+    organization_id: UUID,
+
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+
+    db: Session = Depends(get_db),
+):
+    """
+    Execute complete organization-level portfolio analysis.
+
+    Pipeline:
+        1. Retrieve eligible obligations.
+        2. Analyze cross-contract relationships.
+        3. Generate potential risk findings.
+        4. Persist findings with duplicate protection.
+        5. Return findings requiring human review.
+
+    Only organization owners and administrators can
+    trigger portfolio analysis.
+    """
+
+    try:
+        result = run_organization_portfolio_analysis(
+            db=db,
+            organization_id=organization_id,
+            commit=True,
+        )
+
+        finding_ids = [
+            finding.id
+            for finding in (
+                result["created_findings"]
+                + result["existing_findings"]
+            )
+        ]
+
+        findings = []
+
+        if finding_ids:
+            persisted_findings = (
+                _finding_query(db, organization_id)
+                .filter(
+                    PortfolioRiskFinding.id.in_(finding_ids)
+                )
+                .all()
+            )
+
+            findings = [
+                _serialize_finding(finding)
+                for finding in persisted_findings
+            ]
+
+        return {
+            "organization_id": organization_id,
+            "status": "completed",
+
+            "summary": {
+                "retrieval": result["retrieval"],
+                "intelligence": result["intelligence"],
+                "generation": result["generation"],
+                "persistence": result["persistence"],
+            },
+
+            "findings": findings,
+
+            "human_review_queue": result[
+                "human_review_queue"
+            ],
+        }
+
+    except PortfolioFindingValidationError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        )
+
+    except SQLAlchemyError:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Portfolio analysis could not be completed.",
+        )
