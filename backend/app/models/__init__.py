@@ -15,3 +15,7 @@ from app.models.portfolio_risk_finding import (
     PortfolioRiskFindingContract,
     PortfolioRiskFindingEvidence,
 )
+from app.models.portfolio_analysis_snapshot import (
+    PortfolioAnalysisSnapshot,
+    PortfolioAnalysisSnapshotFinding,
+)
