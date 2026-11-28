@@ -1,0 +1,4098 @@
+
+==============================
+FILE: ..\backend\app\main.py
+==============================
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+
+from app.core.database import get_db
+
+from app.api.v1.documents import router as documents_router
+from app.api.v1.extractions import router as extraction_router
+from app.api.v1.clauses import router as clauses_router
+from app.api.v1.evidence import router as evidence_router
+from app.api.v1.auth import router as auth_router
+from app.api.v1.organizations import router as organizations_router
+from app.api.v1.contracts import router as contracts_router
+from app.api.v1.document_processing import router as document_processing_router
+from app.api.v1.intelligence import router as intelligence_router
+from app.api.v1.portfolio_intelligence import router as portfolio_intelligence_router
+from app.api.v1.portfolio_actions import router as portfolio_actions_router
+from app.api.v1.portfolio_obligations import router as portfolio_obligations_router
+
+app = FastAPI(
+    title="PACTELLE API",
+    description="Intelligent Contract and Policy Intelligence Platform",
+    version="0.1.0",
+)
+
+app.include_router(documents_router, prefix="/api/v1")
+app.include_router(extraction_router, prefix="/api/v1")
+app.include_router(clauses_router, prefix="/api/v1")
+app.include_router(evidence_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(organizations_router, prefix="/api/v1")
+app.include_router(contracts_router, prefix="/api/v1")
+app.include_router(document_processing_router, prefix="/api/v1")
+app.include_router(intelligence_router, prefix="/api/v1")
+app.include_router(portfolio_intelligence_router, prefix="/api/v1")
+app.include_router(portfolio_actions_router, prefix="/api/v1")
+app.include_router(portfolio_obligations_router, prefix="/api/v1")
+
+
+@app.get("/")
+async def root():
+    return {"message": "Welcome to PACTELLE", "status": "running"}
+
+
+@app.get("/api/v1/health")
+async def health_check():
+    return {"status": "healthy", "application": "PACTELLE", "version": "0.1.0"}
+
+
+@app.get("/api/v1/health/db")
+def database_health(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+        return {"status": "healthy", "database": "PostgreSQL", "connected": True}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database connection failed") from exc
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\auth.py
+==============================
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
+from app.core.dependencies import get_current_active_user
+from app.core.database import get_db
+from app.core.security import (
+    hash_password,
+    verify_password,
+    create_access_token
+)
+
+from app.models.user import User
+from app.models.organization import Organization
+from app.models.membership import OrganizationMembership
+
+from app.schemas.auth import (
+    RegisterRequest,
+    LoginRequest,
+    AuthResponse,
+    UserResponse,
+    OrganizationResponse
+)
+
+
+router = APIRouter(
+    prefix="/auth",
+    tags=["Authentication"]
+)
+
+
+@router.post(
+    "/register",
+    response_model=AuthResponse,
+    status_code=status.HTTP_201_CREATED
+)
+def register(
+    request: RegisterRequest,
+    db: Session = Depends(get_db)
+):
+    email = str(request.email).strip().lower()
+
+    existing_user = db.query(User).filter(
+        func.lower(User.email) == email
+    ).first()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists."
+        )
+
+    try:
+        user = User(
+            full_name=request.full_name.strip(),
+            email=email,
+            password_hash=hash_password(request.password),
+            is_active=True
+        )
+
+        organization = Organization(
+            name=request.organization_name.strip()
+        )
+
+        db.add(user)
+        db.add(organization)
+
+        db.flush()
+
+        membership = OrganizationMembership(
+            user_id=user.id,
+            organization_id=organization.id,
+            role="owner"
+        )
+
+        db.add(membership)
+
+        db.commit()
+
+        db.refresh(user)
+        db.refresh(organization)
+
+    except IntegrityError:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Unable to create account. The email may already be registered."
+        )
+
+    except Exception:
+        db.rollback()
+        raise
+
+    access_token = create_access_token(user.id)
+
+    return AuthResponse(
+        access_token=access_token,
+        user=UserResponse.model_validate(user),
+        organization=OrganizationResponse.model_validate(organization)
+    )
+
+
+@router.post(
+    "/login",
+    response_model=AuthResponse
+)
+def login(
+    request: LoginRequest,
+    db: Session = Depends(get_db)
+):
+    email = str(request.email).strip().lower()
+
+    user = db.query(User).filter(
+        func.lower(User.email) == email
+    ).first()
+
+    if not user or not verify_password(
+        request.password,
+        user.password_hash
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has been deactivated."
+        )
+
+    membership = db.query(OrganizationMembership).filter(
+        OrganizationMembership.user_id == user.id
+    ).order_by(OrganizationMembership.created_at.asc()).first()
+
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account is not associated with an organization."
+        )
+
+    organization = db.query(Organization).filter(
+        Organization.id == membership.organization_id
+    ).first()
+
+    if not organization:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your organization could not be found."
+        )
+
+    access_token = create_access_token(user.id)
+
+    return AuthResponse(
+        access_token=access_token,
+        user=UserResponse.model_validate(user),
+        organization=OrganizationResponse.model_validate(organization)
+    )
+
+@router.get("/me", response_model=UserResponse)
+def get_me(
+    current_user: User = Depends(get_current_active_user)
+):
+    return current_user
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\clauses.py
+==============================
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import get_authorized_document
+
+from app.models.document import ContractDocument
+from app.models.document_text import DocumentTextUnit
+from app.models.clause import ContractClause
+
+from app.services.clause_segmenter import segment_clauses
+
+
+router = APIRouter(
+    prefix="/documents",
+    tags=["Clause Intelligence"]
+)
+
+
+@router.post("/{document_id}/segment")
+def segment_document_clauses(
+    document: ContractDocument = Depends(get_authorized_document),
+    db: Session = Depends(get_db)
+):
+
+    document_id = document.id
+
+    text_units = db.query(DocumentTextUnit).filter(
+        DocumentTextUnit.document_id == document_id
+    ).order_by(
+        DocumentTextUnit.unit_index
+    ).all()
+
+    if not text_units:
+        raise HTTPException(
+            status_code=400,
+            detail="Document has not been extracted"
+        )
+
+    all_clauses = []
+
+    for unit in text_units:
+
+        clauses = segment_clauses(
+            text=unit.extracted_text,
+            page_number=unit.page_number
+        )
+
+        all_clauses.extend(clauses)
+
+    if not all_clauses:
+        raise HTTPException(
+            status_code=422,
+            detail="No numbered clauses could be identified"
+        )
+
+    try:
+
+        db.query(ContractClause).filter(
+            ContractClause.document_id == document_id
+        ).delete(synchronize_session=False)
+
+        for clause_data in all_clauses:
+
+            clause = ContractClause(
+                document_id=document_id,
+                **clause_data
+            )
+
+            db.add(clause)
+
+        db.commit()
+
+    except Exception:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Clause segmentation failed"
+        )
+
+    return {
+        "message": "Clauses identified successfully",
+        "document_id": str(document_id),
+        "total_clauses": len(all_clauses),
+        "clauses": [
+            {
+                "clause_number": clause["clause_number"],
+                "clause_title": clause["clause_title"],
+                "category": clause["category"],
+                "page_number": clause["page_number"]
+            }
+            for clause in all_clauses
+        ]
+    }
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\contracts.py
+==============================
+from uuid import UUID
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import (
+    require_organization_role,
+    get_authorized_contract
+)
+
+from app.models.contract import Contract
+from app.models.document import ContractDocument
+from app.models.membership import OrganizationMembership
+
+from app.schemas.contract import ContractResponse
+from app.schemas.document import DocumentResponse
+
+from fastapi import HTTPException, status
+
+from app.core.dependencies import require_contract_role
+
+from app.schemas.contract import (
+    ContractCreateRequest,
+    ContractUpdateRequest
+)
+
+
+router = APIRouter(
+    prefix="/contracts",
+    tags=["Contracts"]
+)
+
+
+# 1. List contracts belonging to an organization
+@router.get(
+    "/organizations/{organization_id}",
+    response_model=list[ContractResponse]
+)
+def list_organization_contracts(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db)
+):
+
+    contracts = (
+        db.query(Contract)
+        .filter(
+            Contract.organization_id == organization_id
+        )
+        .order_by(Contract.created_at.desc())
+        .all()
+    )
+
+    return contracts
+
+
+# 2. View individual contract details
+@router.get(
+    "/{contract_id}",
+    response_model=ContractResponse
+)
+def get_contract_details(
+    contract: Contract = Depends(get_authorized_contract)
+):
+
+    return contract
+
+
+# 3. List documents belonging to a contract
+@router.get(
+    "/{contract_id}/documents",
+    response_model=list[DocumentResponse]
+)
+def list_contract_documents(
+    contract: Contract = Depends(get_authorized_contract),
+    db: Session = Depends(get_db)
+):
+
+    documents = (
+        db.query(ContractDocument)
+        .filter(
+            ContractDocument.contract_id == contract.id
+        )
+        .order_by(ContractDocument.created_at.desc())
+        .all()
+    )
+
+    return documents
+@router.post(
+    "/organizations/{organization_id}",
+    response_model=ContractResponse,
+    status_code=status.HTTP_201_CREATED
+)
+def create_contract(
+    organization_id: UUID,
+    request: ContractCreateRequest,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db)
+):
+    if (
+        request.effective_date
+        and request.expiration_date
+        and request.expiration_date < request.effective_date
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Expiration date cannot be before effective date."
+        )
+
+    contract = Contract(
+        organization_id=organization_id,
+        title=request.title,
+        contract_type=request.contract_type,
+        status=request.status,
+        effective_date=request.effective_date,
+        expiration_date=request.expiration_date
+    )
+
+    db.add(contract)
+    db.commit()
+    db.refresh(contract)
+
+    return contract
+
+@router.patch(
+    "/{contract_id}",
+    response_model=ContractResponse
+)
+def update_contract(
+    request: ContractUpdateRequest,
+    contract: Contract = Depends(
+        require_contract_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db)
+):
+    updates = request.model_dump(exclude_unset=True)
+
+    if not updates:
+        raise HTTPException(
+            status_code=400,
+            detail="No update fields were provided."
+        )
+
+    effective_date = updates.get(
+        "effective_date",
+        contract.effective_date
+    )
+
+    expiration_date = updates.get(
+        "expiration_date",
+        contract.expiration_date
+    )
+
+    if (
+        effective_date
+        and expiration_date
+        and expiration_date < effective_date
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Expiration date cannot be before effective date."
+        )
+
+    for field, value in updates.items():
+        setattr(contract, field, value)
+
+    db.commit()
+    db.refresh(contract)
+
+    return contract
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\documents.py
+==============================
+import logging
+import uuid
+
+from pathlib import Path
+
+from fastapi import (
+    APIRouter,
+    UploadFile,
+    File,
+    Depends,
+    HTTPException,
+    status
+)
+
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import (
+    get_authorized_contract,
+    get_authorized_document,
+    require_document_role
+)
+
+from app.models.contract import Contract
+from app.models.document import ContractDocument
+
+from app.services.document_storage import (
+    save_document,
+    UPLOAD_DIR
+)
+
+from app.schemas.document import (
+    DocumentResponse,
+    DocumentStatusUpdateRequest
+)
+
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(
+    prefix="/documents",
+    tags=["Documents"]
+)
+
+
+# 1. Upload a document
+@router.post("/upload/{contract_id}")
+async def upload_document(
+    contract: Contract = Depends(get_authorized_contract),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+
+    file_data = await save_document(file)
+
+    document = ContractDocument(
+        contract_id=contract.id,
+        original_filename=file_data["original_filename"],
+        stored_filename=file_data["stored_filename"],
+        storage_path=file_data["storage_path"],
+        file_type=file_data["file_type"],
+        file_size=file_data["file_size"],
+        processing_status="uploaded"
+    )
+
+    try:
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+
+    except Exception:
+        db.rollback()
+
+        Path(file_data["storage_path"]).unlink(missing_ok=True)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Document registration failed."
+        )
+
+    return {
+        "message": "Document uploaded successfully",
+        "document_id": str(document.id),
+        "filename": document.original_filename,
+        "status": document.processing_status
+    }
+
+
+# 2. View document details
+@router.get(
+    "/{document_id}",
+    response_model=DocumentResponse
+)
+def get_document_details(
+    document: ContractDocument = Depends(get_authorized_document)
+):
+    return document
+
+
+# 3. Update document processing status
+@router.patch(
+    "/{document_id}/status",
+    response_model=DocumentResponse
+)
+def update_document_status(
+    request: DocumentStatusUpdateRequest,
+    document: ContractDocument = Depends(
+        require_document_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db)
+):
+
+    document.processing_status = request.processing_status
+
+    db.commit()
+    db.refresh(document)
+
+    return document
+
+
+# 4. Delete document and its physical file
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT
+)
+def delete_document(
+    document: ContractDocument = Depends(
+        require_document_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db)
+):
+
+    upload_root = Path(UPLOAD_DIR).resolve()
+    file_path = Path(document.storage_path).resolve()
+
+    # Prevent deletion outside the configured upload directory.
+    if (
+        file_path == upload_root
+        or not file_path.is_relative_to(upload_root)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid document storage path."
+        )
+
+    quarantine_path = file_path.with_name(
+        f"{file_path.name}.deleting-{uuid.uuid4().hex}"
+    )
+
+    file_moved = False
+
+    try:
+        # Move the file first instead of permanently deleting it.
+        if file_path.exists():
+            file_path.rename(quarantine_path)
+            file_moved = True
+
+        # Delete the database record.
+        # Related clauses, evidence and evidence links are handled
+        # by the existing database cascade configuration.
+        db.delete(document)
+        db.commit()
+
+    except Exception:
+        db.rollback()
+
+        # Restore the file if the database operation failed.
+        if file_moved and quarantine_path.exists():
+            quarantine_path.rename(file_path)
+
+        logger.exception(
+            "Document deletion failed for document %s",
+            document.id
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Document deletion failed."
+        )
+
+    # Database deletion succeeded. Permanently remove the quarantined file.
+    if file_moved:
+        try:
+            quarantine_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception(
+                "Could not remove quarantined file for document %s",
+                document.id
+            )
+
+    return None
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\document_processing.py
+==============================
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import get_authorized_document
+from app.models.document import ContractDocument
+from app.services.document_pipeline import process_document_pipeline
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/documents", tags=["Document Intelligence"])
+
+
+@router.post("/{document_id}/process", status_code=status.HTTP_202_ACCEPTED)
+def start_document_processing(
+    document_id: UUID,
+    background_tasks: BackgroundTasks,
+    document: ContractDocument = Depends(get_authorized_document),
+    db: Session = Depends(get_db),
+):
+    if document.processing_status == "processing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is already being processed.",
+        )
+
+    previous_status = document.processing_status
+    previous_started_at = document.processing_started_at
+    previous_attempt_id = document.processing_attempt_id
+    attempt_id = uuid4()
+
+    try:
+        document.processing_status = "processing"
+        document.processing_started_at = datetime.now(timezone.utc)
+        document.processing_attempt_id = attempt_id
+        db.commit()
+
+        background_tasks.add_task(
+            process_document_pipeline,
+            document_id,
+            attempt_id,
+        )
+
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Could not schedule processing for document %s",
+            document_id,
+        )
+
+        refreshed_document = (
+            db.query(ContractDocument)
+            .filter(ContractDocument.id == document_id)
+            .first()
+        )
+
+        if refreshed_document is not None:
+            refreshed_document.processing_status = previous_status
+            refreshed_document.processing_started_at = previous_started_at
+            refreshed_document.processing_attempt_id = previous_attempt_id
+
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Could not restore processing state for %s",
+                    document_id,
+                )
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Document processing could not be scheduled.",
+        )
+
+    return {
+        "message": "Document processing started.",
+        "document_id": str(document_id),
+        "processing_status": "processing",
+        "processing_attempt_id": str(attempt_id),
+    }
+
+
+@router.get("/{document_id}/processing-status")
+def get_document_processing_status(
+    document_id: UUID,
+    document: ContractDocument = Depends(get_authorized_document),
+):
+    return {
+        "document_id": str(document.id),
+        "processing_status": document.processing_status,
+        "filename": document.original_filename,
+        "processing_started_at": document.processing_started_at,
+        "processed_at": document.processed_at,
+    }
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\evidence.py
+==============================
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import get_authorized_document
+
+from app.models.document import ContractDocument
+from app.models.clause import ContractClause
+from app.models.evidence_record import EvidenceRecord
+
+from app.services.evidence_extractor import (
+    extract_evidence_from_clause
+)
+
+
+router = APIRouter(
+    prefix="/documents",
+    tags=["Evidence Intelligence"]
+)
+
+
+@router.post("/{document_id}/extract-evidence")
+def extract_document_evidence(
+    document: ContractDocument = Depends(get_authorized_document),
+    db: Session = Depends(get_db)
+):
+
+    document_id = document.id
+
+    clauses = (
+        db.query(ContractClause)
+        .filter(
+            ContractClause.document_id == document_id
+        )
+        .order_by(
+            ContractClause.clause_number
+        )
+        .all()
+    )
+
+    if not clauses:
+        raise HTTPException(
+            status_code=422,
+            detail="No clauses found. Segment the document first."
+        )
+
+    try:
+
+        # Extract everything before changing existing records.
+        extracted_records = []
+
+        for clause in clauses:
+
+            extracted = extract_evidence_from_clause(clause)
+
+            for item in extracted:
+
+                extracted_records.append({
+                    "clause": clause,
+                    "data": item
+                })
+
+        # Preserve previous evidence records.
+        db.query(EvidenceRecord).filter(
+            EvidenceRecord.document_id == document_id,
+            EvidenceRecord.is_current.is_(True)
+        ).update(
+            {"is_current": False},
+            synchronize_session=False
+        )
+
+        all_evidence = []
+
+        # Insert the new extraction generation.
+        for record in extracted_records:
+
+            clause = record["clause"]
+            item = record["data"]
+
+            evidence = EvidenceRecord(
+                document_id=document_id,
+                clause_id=clause.id,
+                is_current=True,
+                **item
+            )
+
+            db.add(evidence)
+
+            all_evidence.append({
+                "clause_number": clause.clause_number,
+                "claim": item["claim"],
+                "evidence_type": item["evidence_type"],
+                "page_number": item["page_number"],
+            })
+
+        db.commit()
+
+        return {
+            "document_id": str(document_id),
+            "status": "completed",
+            "clauses_processed": len(clauses),
+            "evidence_records_created": len(all_evidence),
+            "historical_evidence_preserved": True,
+            "evidence": all_evidence
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\extractions.py
+==============================
+from pathlib import Path
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import get_authorized_document
+
+from app.models.document import ContractDocument
+from app.models.document_text import DocumentTextUnit
+
+from app.services.document_parser import extract_document
+
+
+router = APIRouter(
+    prefix="/documents",
+    tags=["Document Extraction"]
+)
+
+
+@router.post("/{document_id}/extract")
+def extract_uploaded_document(
+    document: ContractDocument = Depends(get_authorized_document),
+    db: Session = Depends(get_db)
+):
+
+    document_id = document.id
+
+    backend_root = Path(__file__).resolve().parents[3]
+    file_path = backend_root / document.storage_path
+
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Stored document file not found"
+        )
+
+    document.processing_status = "processing"
+    db.commit()
+
+    try:
+
+        extracted_units = extract_document(
+            file_path,
+            document.file_type
+        )
+
+        nonempty_units = [
+            unit for unit in extracted_units
+            if unit["text"].strip()
+        ]
+
+        if not nonempty_units:
+
+            document.processing_status = "needs_ocr"
+            db.commit()
+
+            return {
+                "message": "No selectable text found. OCR is required.",
+                "status": "needs_ocr"
+            }
+
+        db.query(DocumentTextUnit).filter(
+            DocumentTextUnit.document_id == document_id
+        ).delete(synchronize_session=False)
+
+        for unit in nonempty_units:
+
+            text = unit["text"]
+
+            record = DocumentTextUnit(
+                document_id=document_id,
+                unit_index=unit["unit_index"],
+                page_number=unit["page_number"],
+                extracted_text=text,
+                character_count=len(text)
+            )
+
+            db.add(record)
+
+        document.processing_status = "extracted"
+
+        db.commit()
+
+        return {
+            "message": "Document text extracted successfully",
+            "document_id": str(document_id),
+            "status": "extracted",
+            "units_extracted": len(nonempty_units),
+            "total_characters": sum(
+                len(unit["text"]) for unit in nonempty_units
+            )
+        }
+
+    except Exception:
+
+        db.rollback()
+
+        document = db.query(ContractDocument).filter(
+            ContractDocument.id == document_id
+        ).first()
+
+        if document:
+            document.processing_status = "failed"
+            db.commit()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Document extraction failed"
+        )
+
+
+@router.get("/{document_id}/text")
+def get_extracted_text(
+    document: ContractDocument = Depends(get_authorized_document),
+    db: Session = Depends(get_db)
+):
+
+    document_id = document.id
+
+    units = db.query(DocumentTextUnit).filter(
+        DocumentTextUnit.document_id == document_id
+    ).order_by(
+        DocumentTextUnit.unit_index
+    ).all()
+
+    return {
+        "document_id": str(document_id),
+        "filename": document.original_filename,
+        "status": document.processing_status,
+        "total_units": len(units),
+        "extracted_content": [
+            {
+                "unit_index": unit.unit_index,
+                "page_number": unit.page_number,
+                "character_count": unit.character_count,
+                "text": unit.extracted_text
+            }
+            for unit in units
+        ]
+    }
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\intelligence.py
+==============================
+from datetime import date, timedelta
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import require_organization_role
+
+from app.models.organization import Organization
+from app.models.membership import OrganizationMembership
+from app.models.contract import Contract
+from app.models.document import ContractDocument
+from app.models.risk_finding import RiskFinding
+
+from sqlalchemy.orm import joinedload
+
+from app.models.risk_finding_evidence import RiskFindingEvidence
+from app.schemas.risk_scoring import RiskScoreResponse
+from app.services.risk_scoring import calculate_risk_score
+
+from sqlalchemy.orm import joinedload
+
+from app.models.risk_finding_evidence import RiskFindingEvidence
+
+from app.services.risk_scoring import calculate_risk_score
+
+from app.services.risk_prioritization import (
+    classify_urgency,
+    identify_attention_flags,
+    build_investigation_recommendation,
+)
+
+from sqlalchemy.orm import joinedload
+
+from app.models.risk_finding_evidence import RiskFindingEvidence
+
+from app.schemas.risk_explanation import RiskExplanationResponse
+
+from app.services.risk_explanation import explain_risk_finding
+
+from app.models.evidence_record import EvidenceRecord
+
+from app.models.risk_event import RiskEvent
+
+from app.schemas.risk_event import (
+    RiskEventResponse,
+    RiskEventTimelineResponse,
+)
+
+from app.models.risk_event import RiskEvent
+
+from app.schemas.risk_investigation import (
+    RiskInvestigationResponse,
+)
+
+from app.services.risk_investigation import (
+    reconstruct_investigation,
+)
+router = APIRouter(
+    prefix="/organizations",
+    tags=["Organization Intelligence"],
+)
+
+
+def _verify_organization(
+    organization_id: UUID,
+    db: Session,
+):
+    organization = (
+        db.query(Organization)
+        .filter(Organization.id == organization_id)
+        .first()
+    )
+
+    if organization is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Organization not found.",
+        )
+
+    return organization
+
+
+def _grouped_counts(db, model, column, *filters):
+    rows = (
+        db.query(column, func.count(model.id))
+        .filter(*filters)
+        .group_by(column)
+        .all()
+    )
+
+    return {
+        key: count
+        for key, count in rows
+    }
+
+
+# =========================================================
+# 1. ORGANIZATION DASHBOARD
+# =========================================================
+
+@router.get("/{organization_id}/dashboard")
+def organization_dashboard(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    today = date.today()
+
+    total_contracts = (
+        db.query(func.count(Contract.id))
+        .filter(
+            Contract.organization_id == organization_id
+        )
+        .scalar()
+    ) or 0
+
+    contract_status_counts = _grouped_counts(
+        db,
+        Contract,
+        Contract.status,
+        Contract.organization_id == organization_id,
+    )
+
+    total_documents = (
+        db.query(func.count(ContractDocument.id))
+        .join(
+            Contract,
+            Contract.id == ContractDocument.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id
+        )
+        .scalar()
+    ) or 0
+
+    document_status_counts = (
+        db.query(
+            ContractDocument.processing_status,
+            func.count(ContractDocument.id),
+        )
+        .join(
+            Contract,
+            Contract.id == ContractDocument.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id
+        )
+        .group_by(ContractDocument.processing_status)
+        .all()
+    )
+
+    document_status_counts = {
+        status: count
+        for status, count in document_status_counts
+    }
+
+    open_risk_filters = (
+        RiskFinding.status != "resolved",
+        RiskFinding.contract_id == Contract.id,
+        Contract.organization_id == organization_id,
+    )
+
+    open_risks = (
+        db.query(func.count(RiskFinding.id))
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .filter(*open_risk_filters)
+        .scalar()
+    ) or 0
+
+    risk_severity_counts = (
+        db.query(
+            RiskFinding.severity,
+            func.count(RiskFinding.id),
+        )
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .filter(
+            RiskFinding.status != "resolved",
+            Contract.organization_id == organization_id,
+        )
+        .group_by(RiskFinding.severity)
+        .all()
+    )
+
+    risk_severity_counts = {
+        severity: count
+        for severity, count in risk_severity_counts
+    }
+
+    upcoming_renewals = (
+        db.query(func.count(RiskFinding.id))
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+            RiskFinding.rule_id == "RENEWAL-001",
+            RiskFinding.status != "resolved",
+            RiskFinding.deadline_date >= today,
+            RiskFinding.deadline_date <= today + timedelta(days=90),
+        )
+        .scalar()
+    ) or 0
+
+    expiring_contracts = (
+        db.query(func.count(Contract.id))
+        .filter(
+            Contract.organization_id == organization_id,
+            Contract.expiration_date >= today,
+            Contract.expiration_date <= today + timedelta(days=30),
+            Contract.status.notin_(["expired", "terminated"]),
+        )
+        .scalar()
+    ) or 0
+
+    return {
+        "organization_id": str(organization_id),
+        "generated_at": today.isoformat(),
+
+        "contracts": {
+            "total": total_contracts,
+            "by_status": contract_status_counts,
+        },
+
+        "documents": {
+            "total": total_documents,
+            "by_processing_status": document_status_counts,
+        },
+
+        "risks": {
+            "total_open": open_risks,
+            "by_severity": risk_severity_counts,
+        },
+
+        "monitoring": {
+            "upcoming_renewals_next_90_days": upcoming_renewals,
+            "contracts_expiring_next_30_days": expiring_contracts,
+        },
+    }
+
+
+# =========================================================
+# 2. UPCOMING RENEWALS
+# =========================================================
+
+@router.get("/{organization_id}/upcoming-renewals")
+def get_upcoming_renewals(
+    organization_id: UUID,
+    days: int = Query(default=90, ge=1, le=365),
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    today = date.today()
+    deadline_limit = today + timedelta(days=days)
+
+    results = (
+        db.query(RiskFinding, Contract)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+            RiskFinding.rule_id == "RENEWAL-001",
+            RiskFinding.status != "resolved",
+            RiskFinding.deadline_date >= today,
+            RiskFinding.deadline_date <= deadline_limit,
+        )
+        .order_by(RiskFinding.deadline_date.asc())
+        .all()
+    )
+
+    renewals = []
+
+    for finding, contract in results:
+        renewals.append({
+            "risk_finding_id": str(finding.id),
+            "contract_id": str(contract.id),
+            "contract_title": contract.title,
+            "contract_expiration_date": (
+                contract.expiration_date.isoformat()
+                if contract.expiration_date
+                else None
+            ),
+            "non_renewal_deadline": (
+                finding.deadline_date.isoformat()
+                if finding.deadline_date
+                else None
+            ),
+            "days_until_deadline": (
+                finding.deadline_date - today
+            ).days,
+            "severity": finding.severity,
+            "assessment_status": finding.assessment_status,
+            "risk_status": finding.status,
+        })
+
+    return {
+        "organization_id": str(organization_id),
+        "period_days": days,
+        "total": len(renewals),
+        "renewals": renewals,
+    }
+
+
+# =========================================================
+# 3. EXPIRING CONTRACTS
+# =========================================================
+
+@router.get("/{organization_id}/expiring-contracts")
+def get_expiring_contracts(
+    organization_id: UUID,
+    days: int = Query(default=30, ge=1, le=365),
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    today = date.today()
+    expiration_limit = today + timedelta(days=days)
+
+    contracts = (
+        db.query(Contract)
+        .filter(
+            Contract.organization_id == organization_id,
+            Contract.expiration_date >= today,
+            Contract.expiration_date <= expiration_limit,
+            Contract.status.notin_(["expired", "terminated"]),
+        )
+        .order_by(Contract.expiration_date.asc())
+        .all()
+    )
+
+    results = []
+
+    for contract in contracts:
+        results.append({
+            "contract_id": str(contract.id),
+            "title": contract.title,
+            "contract_type": contract.contract_type,
+            "status": contract.status,
+            "effective_date": (
+                contract.effective_date.isoformat()
+                if contract.effective_date
+                else None
+            ),
+            "expiration_date": contract.expiration_date.isoformat(),
+            "days_until_expiration": (
+                contract.expiration_date - today
+            ).days,
+        })
+
+    return {
+        "organization_id": str(organization_id),
+        "period_days": days,
+        "total": len(results),
+        "contracts": results,
+    }
+
+
+# =========================================================
+# 4. RISK OVERVIEW
+# =========================================================
+
+@router.get("/{organization_id}/risk-overview")
+def get_risk_overview(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    base_query = (
+        db.query(RiskFinding)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+        )
+    )
+
+    total_findings = base_query.count()
+
+    open_findings = base_query.filter(
+        RiskFinding.status != "resolved"
+    ).count()
+
+    resolved_findings = base_query.filter(
+        RiskFinding.status == "resolved"
+    ).count()
+
+    severity_counts = (
+        db.query(
+            RiskFinding.severity,
+            func.count(RiskFinding.id),
+        )
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+            RiskFinding.status != "resolved",
+        )
+        .group_by(RiskFinding.severity)
+        .all()
+    )
+
+    assessment_counts = (
+        db.query(
+            RiskFinding.assessment_status,
+            func.count(RiskFinding.id),
+        )
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+            RiskFinding.status != "resolved",
+        )
+        .group_by(RiskFinding.assessment_status)
+        .all()
+    )
+
+    risk_type_counts = (
+        db.query(
+            RiskFinding.risk_type,
+            func.count(RiskFinding.id),
+        )
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+            RiskFinding.status != "resolved",
+        )
+        .group_by(RiskFinding.risk_type)
+        .all()
+    )
+
+    return {
+        "organization_id": str(organization_id),
+
+        "summary": {
+            "total_findings": total_findings,
+            "open_findings": open_findings,
+            "resolved_findings": resolved_findings,
+        },
+
+        "open_findings_by_severity": {
+            severity: count
+            for severity, count in severity_counts
+        },
+
+        "open_findings_by_assessment": {
+            assessment: count
+            for assessment, count in assessment_counts
+        },
+
+        "open_findings_by_type": {
+            risk_type: count
+            for risk_type, count in risk_type_counts
+        },
+    }
+
+# =========================================================
+# 5. EVIDENCE-AWARE RISK SCORING
+# =========================================================
+
+@router.get(
+    "/{organization_id}/risk-scores",
+    response_model=list[RiskScoreResponse],
+)
+def get_organization_risk_scores(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    findings = (
+        db.query(RiskFinding)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .options(
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            )
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+            RiskFinding.status != "resolved",
+        )
+        .all()
+    )
+
+    results = []
+
+    for finding in findings:
+
+        evidence_records = [
+            link.evidence_record
+            for link in finding.evidence_links
+            if link.evidence_record is not None
+        ]
+
+        scoring = calculate_risk_score(
+            finding,
+            evidence_records,
+        )
+
+        results.append({
+            "risk_finding_id": str(finding.id),
+            "contract_id": str(finding.contract_id),
+            "title": finding.title,
+            "risk_type": finding.risk_type,
+            "severity": finding.severity,
+            "status": finding.status,
+            **scoring,
+        })
+
+    results.sort(
+        key=lambda item: item["risk_score"],
+        reverse=True,
+    )
+
+    return results
+
+# =========================================================
+# 6. ORGANIZATION RISK PRIORITIZATION
+# =========================================================
+
+@router.get("/{organization_id}/risk-prioritization")
+def get_risk_prioritization(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    today = date.today()
+
+    findings = (
+        db.query(RiskFinding, Contract)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .options(
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            )
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+            RiskFinding.status != "resolved",
+        )
+        .all()
+    )
+
+    prioritized = []
+
+    for finding, contract in findings:
+
+        evidence_records = [
+            link.evidence_record
+            for link in finding.evidence_links
+            if link.evidence_record is not None
+        ]
+
+        scoring = calculate_risk_score(
+            finding,
+            evidence_records,
+            today=today,
+        )
+
+        urgency = classify_urgency(
+            finding.deadline_date,
+            today,
+        )
+
+        flags = identify_attention_flags(
+            finding,
+            scoring,
+        )
+
+        recommendation = build_investigation_recommendation(
+            finding,
+            urgency,
+            flags,
+        )
+
+        prioritized.append({
+            "risk_finding_id": str(finding.id),
+            "contract_id": str(contract.id),
+            "contract_title": contract.title,
+            "title": finding.title,
+            "risk_type": finding.risk_type,
+            "severity": finding.severity,
+            "assessment_status": finding.assessment_status,
+            "deadline_date": (
+                finding.deadline_date.isoformat()
+                if finding.deadline_date
+                else None
+            ),
+            "days_until_deadline": (
+                (finding.deadline_date - today).days
+                if finding.deadline_date
+                else None
+            ),
+            "urgency": urgency,
+            "risk_score": scoring["risk_score"],
+            "priority": scoring["priority"],
+            "evidence_confidence": scoring["evidence_confidence"],
+            "attention_flags": flags,
+            "recommendation": recommendation,
+        })
+
+    prioritized.sort(
+        key=lambda item: (
+            item["risk_score"],
+            item["urgency"] == "overdue",
+        ),
+        reverse=True,
+    )
+
+    return {
+        "organization_id": str(organization_id),
+        "generated_on": today.isoformat(),
+        "total_open_risks": len(prioritized),
+        "high_impact_low_confidence_count": sum(
+            "high_impact_low_confidence" in item["attention_flags"]
+            for item in prioritized
+        ),
+        "overdue_count": sum(
+            item["urgency"] == "overdue"
+            for item in prioritized
+        ),
+        "prioritized_risks": prioritized,
+    }
+
+# =========================================================
+# 7. EXPLAINABLE RISK INTELLIGENCE
+# =========================================================
+
+@router.get(
+    "/{organization_id}/risk-findings/{risk_finding_id}/explanation",
+    response_model=RiskExplanationResponse,
+)
+def get_risk_explanation(
+    organization_id: UUID,
+    risk_finding_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    _verify_organization(organization_id, db)
+
+    finding = (
+        db.query(RiskFinding)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .options(
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            ).joinedload(
+                EvidenceRecord.clause
+            ),
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            ).joinedload(
+                EvidenceRecord.document
+            ),
+        )
+        .filter(
+            RiskFinding.id == risk_finding_id,
+            Contract.organization_id == organization_id,
+        )
+        .first()
+    )
+
+    if finding is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Risk finding not found.",
+        )
+
+    return explain_risk_finding(finding)
+
+# =========================================================
+# 8. RISK INTELLIGENCE TIMELINE
+# =========================================================
+
+@router.get(
+    "/{organization_id}/risk-events",
+    response_model=RiskEventTimelineResponse,
+)
+def get_risk_event_timeline(
+    organization_id: UUID,
+
+    contract_id: UUID | None = None,
+    risk_finding_id: UUID | None = None,
+    event_type: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=50,
+    ),
+
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieve the chronological history of risk intelligence events
+    belonging to an organization.
+    """
+
+    _verify_organization(organization_id, db)
+
+    # Base query is always scoped to the user's organization.
+    query = (
+        db.query(RiskEvent)
+        .join(
+            Contract,
+            Contract.id == RiskEvent.contract_id,
+        )
+        .filter(
+            Contract.organization_id == organization_id,
+        )
+    )
+
+    # Optional contract filter.
+    if contract_id is not None:
+        query = query.filter(
+            RiskEvent.contract_id == contract_id,
+        )
+
+    # Optional risk finding filter.
+    if risk_finding_id is not None:
+        query = query.filter(
+            RiskEvent.risk_finding_id == risk_finding_id,
+        )
+
+    # Optional event type filter.
+    if event_type is not None:
+        query = query.filter(
+            RiskEvent.event_type == event_type.strip(),
+        )
+
+    # Calculate total before pagination.
+    total = query.count()
+
+    # Calculate pagination metadata.
+    total_pages = (
+        (total + page_size - 1) // page_size
+        if total > 0
+        else 0
+    )
+
+    offset = (page - 1) * page_size
+
+    # Newest events first, with deterministic tie-breaking.
+    events = (
+        query
+        .order_by(
+            RiskEvent.created_at.desc(),
+            RiskEvent.id.desc(),
+        )
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+
+    return RiskEventTimelineResponse(
+        organization_id=organization_id,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        events=events,
+    )
+
+# =========================================================
+# 9. RISK INVESTIGATION INTELLIGENCE
+# =========================================================
+
+@router.get(
+    "/{organization_id}/risk-findings/{risk_finding_id}/investigation",
+    response_model=RiskInvestigationResponse,
+)
+def get_risk_investigation(
+    organization_id: UUID,
+    risk_finding_id: UUID,
+
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+
+    db: Session = Depends(get_db),
+):
+    """
+    Reconstruct the complete historical investigation of a risk.
+    """
+
+    _verify_organization(organization_id, db)
+
+    # Retrieve only findings belonging to this organization.
+    finding = (
+        db.query(RiskFinding)
+        .join(
+            Contract,
+            Contract.id == RiskFinding.contract_id,
+        )
+        .options(
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            ).joinedload(
+                EvidenceRecord.clause
+            ),
+
+            joinedload(
+                RiskFinding.evidence_links
+            ).joinedload(
+                RiskFindingEvidence.evidence_record
+            ).joinedload(
+                EvidenceRecord.document
+            ),
+        )
+        .filter(
+            RiskFinding.id == risk_finding_id,
+            Contract.organization_id == organization_id,
+        )
+        .first()
+    )
+
+    if finding is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Risk finding not found.",
+        )
+
+    # Retrieve historical events for this finding.
+    events = (
+        db.query(RiskEvent)
+        .filter(
+            RiskEvent.risk_finding_id == risk_finding_id,
+            RiskEvent.contract_id == finding.contract_id,
+        )
+        .order_by(
+            RiskEvent.created_at.asc(),
+            RiskEvent.id.asc(),
+        )
+        .all()
+    )
+
+    return reconstruct_investigation(
+        finding,
+        events,
+    )
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\organizations.py
+==============================
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import require_organization_role
+
+from app.models.user import User
+from app.models.membership import OrganizationMembership
+
+from app.schemas.organization import (
+    OrganizationMemberResponse,
+    OrganizationMemberInviteRequest,
+    OrganizationMemberRoleUpdateRequest
+)
+
+
+
+
+router = APIRouter(
+    prefix="/organizations",
+    tags=["Organizations"]
+)
+
+
+@router.get(
+    "/{organization_id}/members",
+    response_model=list[OrganizationMemberResponse]
+)
+def list_organization_members(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db)
+):
+
+    members = (
+        db.query(OrganizationMembership, User)
+        .join(
+            User,
+            User.id == OrganizationMembership.user_id
+        )
+        .filter(
+            OrganizationMembership.organization_id == organization_id
+        )
+        .order_by(OrganizationMembership.created_at.asc())
+        .all()
+    )
+
+    return [
+        OrganizationMemberResponse(
+            user_id=user.id,
+            full_name=user.full_name,
+            email=user.email,
+            role=member_membership.role,
+            joined_at=member_membership.created_at
+        )
+        for member_membership, user in members
+    ]
+
+
+@router.post(
+    "/{organization_id}/members",
+    response_model=OrganizationMemberResponse,
+    status_code=status.HTTP_201_CREATED
+)
+def invite_organization_member(
+    organization_id: UUID,
+    request: OrganizationMemberInviteRequest,
+    current_membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db)
+):
+
+    email = str(request.email).strip().lower()
+    requested_role = request.role.strip().lower()
+
+    if requested_role not in {"admin", "member"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Role must be either 'admin' or 'member'."
+        )
+
+    user = db.query(User).filter(
+        func.lower(User.email) == email
+    ).first()
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No registered user exists with this email."
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot add an inactive user."
+        )
+
+    existing_membership = db.query(
+        OrganizationMembership
+    ).filter(
+        OrganizationMembership.organization_id == organization_id,
+        OrganizationMembership.user_id == user.id
+    ).first()
+
+    if existing_membership:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User is already a member of this organization."
+        )
+
+    new_membership = OrganizationMembership(
+        organization_id=organization_id,
+        user_id=user.id,
+        role=requested_role
+    )
+
+    try:
+        db.add(new_membership)
+        db.commit()
+        db.refresh(new_membership)
+
+    except IntegrityError:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Unable to add member. Membership may already exist."
+        )
+
+    return OrganizationMemberResponse(
+        user_id=user.id,
+        full_name=user.full_name,
+        email=user.email,
+        role=new_membership.role,
+        joined_at=new_membership.created_at
+    )
+@router.delete(
+    "/{organization_id}/members/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT
+)
+def remove_organization_member(
+    organization_id: UUID,
+    user_id: UUID,
+    current_membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db)
+):
+    # Prevent users from removing themselves through this endpoint.
+    if current_membership.user_id == user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot remove yourself using this endpoint."
+        )
+
+    # Find the target user's membership.
+    target_membership = (
+        db.query(OrganizationMembership)
+        .filter(
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.user_id == user_id
+        )
+        .first()
+    )
+
+    if not target_membership:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization member not found."
+        )
+
+    # Organization owners cannot be removed.
+    if target_membership.role == "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The organization owner cannot be removed."
+        )
+
+    # Admins cannot remove other admins.
+    if (
+        current_membership.role == "admin"
+        and target_membership.role == "admin"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admins cannot remove other admins."
+        )
+
+    db.delete(target_membership)
+    db.commit()
+
+    return None
+
+@router.patch(
+    "/{organization_id}/members/{user_id}/role",
+    response_model=OrganizationMemberResponse
+)
+def update_organization_member_role(
+    organization_id: UUID,
+    user_id: UUID,
+    request: OrganizationMemberRoleUpdateRequest,
+    current_membership: OrganizationMembership = Depends(
+        require_organization_role("owner")
+    ),
+    db: Session = Depends(get_db)
+):
+    # Find the target membership.
+    target_membership = (
+        db.query(OrganizationMembership)
+        .filter(
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.user_id == user_id
+        )
+        .first()
+    )
+
+    if target_membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization member not found."
+        )
+
+    # Protect the organization owner.
+    if target_membership.role == "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The organization owner's role cannot be changed."
+        )
+
+    # Update the role.
+    target_membership.role = request.role
+
+    try:
+        db.commit()
+        db.refresh(target_membership)
+
+    except IntegrityError:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Unable to update member role."
+        )
+
+    user = db.query(User).filter(
+        User.id == user_id
+    ).first()
+
+    return OrganizationMemberResponse(
+        user_id=user.id,
+        full_name=user.full_name,
+        email=user.email,
+        role=target_membership.role,
+        joined_at=target_membership.created_at
+    )
+
+@router.delete(
+    "/{organization_id}/leave",
+    status_code=status.HTTP_204_NO_CONTENT
+)
+def leave_organization(
+    organization_id: UUID,
+    current_membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db)
+):
+    # Owners must transfer ownership before leaving.
+    if current_membership.role == "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization owners must transfer ownership before leaving."
+        )
+
+    db.delete(current_membership)
+    db.commit()
+
+    return None
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\portfolio_actions.py
+==============================
+from math import ceil
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import require_organization_role
+from app.models.membership import OrganizationMembership
+from app.schemas.portfolio_action import (
+    PortfolioActionCreate,
+    PortfolioActionAssignmentUpdate,
+    PortfolioActionStatusUpdate,
+    PortfolioActionResponse,
+    PortfolioActionListResponse,
+    PortfolioActionRecommendationResponse,
+)
+from app.services.portfolio_action_service import (
+    PortfolioActionNotFoundError,
+    PortfolioActionValidationError,
+    create_portfolio_action,
+    generate_actions_for_finding,
+    get_portfolio_action,
+    list_portfolio_actions,
+    transition_portfolio_action,
+    update_portfolio_action_assignment,
+)
+
+router = APIRouter(
+    prefix="/organizations",
+    tags=["Portfolio Actions"],
+)
+
+
+def _http_error(exc):
+    if isinstance(exc, PortfolioActionNotFoundError):
+        raise HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, PortfolioActionValidationError):
+        raise HTTPException(status_code=422, detail=str(exc))
+    raise HTTPException(status_code=500, detail="Portfolio action operation failed.")
+
+
+@router.post(
+    "/{organization_id}/portfolio-findings/{finding_id}/action-recommendations",
+    response_model=PortfolioActionRecommendationResponse,
+)
+def create_recommendations(
+    organization_id: UUID,
+    finding_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        result = generate_actions_for_finding(
+            db, organization_id, finding_id, membership.user_id, commit=True
+        )
+        actions = result["created_actions"] + result["existing_actions"]
+        return {
+            "organization_id": organization_id,
+            "finding_id": finding_id,
+            "created_count": result["created_count"],
+            "existing_count": result["existing_count"],
+            "actions": actions,
+        }
+    except (PortfolioActionNotFoundError, PortfolioActionValidationError) as exc:
+        _http_error(exc)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(500, "Could not generate action recommendations.")
+
+
+@router.post(
+    "/{organization_id}/portfolio-actions",
+    response_model=PortfolioActionResponse,
+    status_code=201,
+)
+def create_action(
+    organization_id: UUID,
+    request: PortfolioActionCreate,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        return create_portfolio_action(
+            db,
+            organization_id,
+            request.finding_id,
+            membership.user_id,
+            title=request.title,
+            description=request.description,
+            rationale=request.rationale,
+            priority=request.priority,
+            due_date=request.due_date,
+            assigned_to_user_id=request.assigned_to_user_id,
+            commit=True,
+        )
+    except (PortfolioActionNotFoundError, PortfolioActionValidationError) as exc:
+        _http_error(exc)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(500, "Could not create portfolio action.")
+
+
+@router.get(
+    "/{organization_id}/portfolio-actions",
+    response_model=PortfolioActionListResponse,
+)
+def list_actions(
+    organization_id: UUID,
+    finding_id: UUID | None = None,
+    status: str | None = None,
+    priority: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        actions, total = list_portfolio_actions(
+            db,
+            organization_id,
+            finding_id=finding_id,
+            status=status,
+            priority=priority,
+            offset=(page - 1) * page_size,
+            limit=page_size,
+        )
+        return {
+            "organization_id": organization_id,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": ceil(total / page_size) if total else 0,
+            "actions": actions,
+        }
+    except PortfolioActionValidationError as exc:
+        _http_error(exc)
+
+
+@router.get(
+    "/{organization_id}/portfolio-actions/{action_id}",
+    response_model=PortfolioActionResponse,
+)
+def get_action(
+    organization_id: UUID,
+    action_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        return get_portfolio_action(db, organization_id, action_id)
+    except PortfolioActionNotFoundError as exc:
+        _http_error(exc)
+
+
+@router.patch(
+    "/{organization_id}/portfolio-actions/{action_id}/assignment",
+    response_model=PortfolioActionResponse,
+)
+def update_assignment(
+    organization_id: UUID,
+    action_id: UUID,
+    request: PortfolioActionAssignmentUpdate,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        update_portfolio_action_assignment(
+            db,
+            organization_id,
+            action_id,
+            membership.user_id,
+            request.assigned_to_user_id,
+            commit=True,
+        )
+        return get_portfolio_action(db, organization_id, action_id)
+    except (PortfolioActionNotFoundError, PortfolioActionValidationError) as exc:
+        _http_error(exc)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(500, "Could not update action assignment.")
+
+
+@router.patch(
+    "/{organization_id}/portfolio-actions/{action_id}/status",
+    response_model=PortfolioActionResponse,
+)
+def update_action_status(
+    organization_id: UUID,
+    action_id: UUID,
+    request: PortfolioActionStatusUpdate,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        transition_portfolio_action(
+            db,
+            organization_id,
+            action_id,
+            membership.user_id,
+            request.status,
+            comment=request.comment,
+            commit=True,
+        )
+        return get_portfolio_action(db, organization_id, action_id)
+    except (PortfolioActionNotFoundError, PortfolioActionValidationError) as exc:
+        _http_error(exc)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(500, "Could not update action status.")
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\portfolio_intelligence.py
+==============================
+from math import ceil
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, selectinload
+
+from app.core.database import get_db
+from app.core.dependencies import require_organization_role
+
+from app.models.membership import OrganizationMembership
+from app.models.portfolio_risk_finding import (
+    PortfolioRiskFinding,
+    PortfolioRiskFindingContract,
+    PortfolioRiskFindingEvidence,
+)
+from app.models.portfolio_analysis_snapshot import (
+    PortfolioAnalysisSnapshot,
+)
+from app.models.evidence_record import EvidenceRecord
+from app.models.document import ContractDocument
+
+from app.schemas.portfolio_finding import (
+    PortfolioFindingListResponse,
+    PortfolioFindingResponse,
+    PortfolioFindingStatusUpdate,
+    PortfolioAnalysisResponse,
+    PortfolioEvolutionResponse,
+    PortfolioSnapshotListResponse,
+    PortfolioSnapshotDetailResponse,
+    PortfolioRiskTrendResponse,
+)
+
+from app.services.portfolio_finding_service import (
+    PortfolioFindingValidationError,
+    PortfolioFindingNotFoundError,
+    update_portfolio_finding_status,
+)
+from app.services.portfolio_analysis_service import (
+    run_organization_portfolio_analysis,
+)
+from app.services.portfolio_evolution import (
+    compare_portfolio_snapshots,
+    PortfolioEvolutionError,
+)
+from app.services.portfolio_trend_engine import (
+    analyze_portfolio_risk_trends,
+    PortfolioTrendError,
+)
+
+
+router = APIRouter(
+    prefix="/organizations",
+    tags=["Portfolio Intelligence"],
+)
+
+
+def _finding_query(db: Session, organization_id: UUID):
+    return (
+        db.query(PortfolioRiskFinding)
+        .filter(
+            PortfolioRiskFinding.organization_id == organization_id
+        )
+        .options(
+            selectinload(
+                PortfolioRiskFinding.contract_links
+            ).joinedload(
+                PortfolioRiskFindingContract.contract
+            ),
+            selectinload(
+                PortfolioRiskFinding.evidence_links
+            ).joinedload(
+                PortfolioRiskFindingEvidence.evidence_record
+            ).joinedload(
+                EvidenceRecord.document
+            ).joinedload(
+                ContractDocument.contract
+            ),
+        )
+    )
+
+
+def _serialize_finding(finding):
+    contracts = []
+
+    for link in finding.contract_links:
+        contract = link.contract
+
+        if contract is None:
+            continue
+
+        contracts.append({
+            "id": contract.id,
+            "title": contract.title,
+            "status": contract.status,
+        })
+
+    evidence = []
+
+    for link in finding.evidence_links:
+        record = link.evidence_record
+
+        if record is None:
+            continue
+
+        document = record.document
+        contract = document.contract if document else None
+
+        evidence.append({
+            "evidence_id": record.id,
+            "contract_id": contract.id if contract else None,
+            "contract_title": contract.title if contract else None,
+            "evidence_type": record.evidence_type,
+            "claim": record.claim,
+            "evidence_text": record.evidence_text,
+            "verification_status": record.verification_status,
+            "confidence": record.confidence,
+            "page_number": record.page_number,
+            "clause_id": record.clause_id,
+            "document_id": record.document_id,
+        })
+
+    return {
+        "id": finding.id,
+        "organization_id": finding.organization_id,
+        "finding_type": finding.finding_type,
+        "title": finding.title,
+        "description": finding.description,
+        "severity": finding.severity,
+        "status": finding.status,
+        "assessment_status": finding.assessment_status,
+        "detection_method": finding.detection_method,
+        "rule_id": finding.rule_id,
+        "rule_version": finding.rule_version,
+        "confidence": finding.confidence,
+        "details": finding.details,
+        "created_at": finding.created_at,
+        "contracts": contracts,
+        "evidence": evidence,
+    }
+
+
+# =========================================================
+# LIST PORTFOLIO FINDINGS
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-findings",
+    response_model=PortfolioFindingListResponse,
+)
+def list_portfolio_findings(
+    organization_id: UUID,
+    finding_type: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    valid_types = {
+        "similarity",
+        "potential_conflict",
+        "repeated_risk",
+        "exposure_concentration",
+    }
+
+    valid_severities = {"critical", "high", "medium", "low"}
+    valid_statuses = {"open", "acknowledged", "resolved"}
+
+    if finding_type is not None and finding_type not in valid_types:
+        raise HTTPException(422, "Invalid finding type.")
+
+    if severity is not None and severity not in valid_severities:
+        raise HTTPException(422, "Invalid severity.")
+
+    if status is not None and status not in valid_statuses:
+        raise HTTPException(422, "Invalid finding status.")
+
+    query = _finding_query(db, organization_id)
+
+    if finding_type:
+        query = query.filter(
+            PortfolioRiskFinding.finding_type == finding_type
+        )
+
+    if severity:
+        query = query.filter(
+            PortfolioRiskFinding.severity == severity
+        )
+
+    if status:
+        query = query.filter(
+            PortfolioRiskFinding.status == status
+        )
+
+    total = query.count()
+    total_pages = ceil(total / page_size) if total else 0
+
+    findings = (
+        query
+        .order_by(
+            PortfolioRiskFinding.created_at.desc(),
+            PortfolioRiskFinding.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    return {
+        "organization_id": organization_id,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "findings": [
+            _serialize_finding(finding)
+            for finding in findings
+        ],
+    }
+
+
+# =========================================================
+# GET PORTFOLIO FINDING
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-findings/{finding_id}",
+    response_model=PortfolioFindingResponse,
+)
+def get_portfolio_finding(
+    organization_id: UUID,
+    finding_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    finding = (
+        _finding_query(db, organization_id)
+        .filter(PortfolioRiskFinding.id == finding_id)
+        .first()
+    )
+
+    if finding is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Portfolio finding not found.",
+        )
+
+    return _serialize_finding(finding)
+
+
+# =========================================================
+# HUMAN REVIEW / STATUS UPDATE
+# =========================================================
+
+@router.patch(
+    "/{organization_id}/portfolio-findings/{finding_id}/status",
+    response_model=PortfolioFindingResponse,
+)
+def update_portfolio_finding(
+    organization_id: UUID,
+    finding_id: UUID,
+    request: PortfolioFindingStatusUpdate,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        update_portfolio_finding_status(
+            db=db,
+            organization_id=organization_id,
+            finding_id=finding_id,
+            new_status=request.status,
+            commit=True,
+        )
+
+    except PortfolioFindingNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Portfolio finding not found.",
+        )
+
+    except PortfolioFindingValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        )
+
+    finding = (
+        _finding_query(db, organization_id)
+        .filter(PortfolioRiskFinding.id == finding_id)
+        .first()
+    )
+
+    return _serialize_finding(finding)
+
+
+# =========================================================
+# ORGANIZATION PORTFOLIO ANALYSIS
+# =========================================================
+
+@router.post(
+    "/{organization_id}/portfolio-analysis",
+    response_model=PortfolioAnalysisResponse,
+)
+def analyze_portfolio(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Execute complete organization-level portfolio analysis.
+
+    Pipeline:
+        1. Retrieve eligible obligations.
+        2. Analyze cross-contract relationships.
+        3. Generate potential risk findings.
+        4. Persist findings with duplicate protection.
+        5. Persist an immutable analysis snapshot.
+        6. Return findings requiring human review.
+
+    Only organization owners and administrators can
+    trigger portfolio analysis.
+    """
+
+    try:
+        result = run_organization_portfolio_analysis(
+            db=db,
+            organization_id=organization_id,
+            commit=True,
+        )
+
+        finding_ids = [
+            finding.id
+            for finding in (
+                result["created_findings"]
+                + result["existing_findings"]
+            )
+        ]
+
+        findings = []
+
+        if finding_ids:
+            persisted_findings = (
+                _finding_query(db, organization_id)
+                .filter(
+                    PortfolioRiskFinding.id.in_(finding_ids)
+                )
+                .all()
+            )
+
+            findings = [
+                _serialize_finding(finding)
+                for finding in persisted_findings
+            ]
+
+        return {
+            "organization_id": organization_id,
+            "status": "completed",
+            "summary": {
+                "retrieval": result["retrieval"],
+                "intelligence": result["intelligence"],
+                "generation": result["generation"],
+                "persistence": result["persistence"],
+                "snapshot": result.get("snapshot", {}),
+            },
+            "findings": findings,
+            "human_review_queue": result["human_review_queue"],
+        }
+
+    except PortfolioFindingValidationError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        )
+
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Portfolio analysis could not be completed.",
+        )
+
+
+# =========================================================
+# PORTFOLIO RISK EVOLUTION
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-evolution",
+    response_model=PortfolioEvolutionResponse,
+)
+def get_portfolio_evolution(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Compare the two most recent portfolio analysis snapshots.
+
+    This endpoint is read-only and never automatically resolves
+    live portfolio findings.
+    """
+
+    try:
+        snapshots = (
+            db.query(PortfolioAnalysisSnapshot)
+            .filter(
+                PortfolioAnalysisSnapshot.organization_id
+                == organization_id
+            )
+            .order_by(
+                PortfolioAnalysisSnapshot.created_at.desc(),
+                PortfolioAnalysisSnapshot.id.desc(),
+            )
+            .limit(2)
+            .all()
+        )
+
+        if len(snapshots) < 2:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "At least two portfolio analysis snapshots "
+                    "are required to calculate risk evolution."
+                ),
+            )
+
+        current_snapshot = snapshots[0]
+        previous_snapshot = snapshots[1]
+
+        return compare_portfolio_snapshots(
+            previous_snapshot,
+            current_snapshot,
+        )
+
+    except PortfolioEvolutionError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        )
+
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Portfolio evolution analysis could not be completed.",
+        )
+
+
+# =========================================================
+# PORTFOLIO SNAPSHOT HISTORY
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-snapshots",
+    response_model=PortfolioSnapshotListResponse,
+)
+def list_portfolio_snapshots(
+    organization_id: UUID,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    """Return paginated, newest-first organization snapshot history."""
+
+    query = db.query(PortfolioAnalysisSnapshot).filter(
+        PortfolioAnalysisSnapshot.organization_id == organization_id
+    )
+
+    total = query.count()
+    total_pages = ceil(total / page_size) if total else 0
+
+    snapshots = (
+        query
+        .order_by(
+            PortfolioAnalysisSnapshot.created_at.desc(),
+            PortfolioAnalysisSnapshot.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    return {
+        "organization_id": organization_id,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "snapshots": snapshots,
+    }
+
+
+# =========================================================
+# PORTFOLIO SNAPSHOT DETAIL
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-snapshots/{snapshot_id}",
+    response_model=PortfolioSnapshotDetailResponse,
+)
+def get_portfolio_snapshot(
+    organization_id: UUID,
+    snapshot_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    snapshot = (
+        db.query(PortfolioAnalysisSnapshot)
+        .filter(
+            PortfolioAnalysisSnapshot.id == snapshot_id,
+            PortfolioAnalysisSnapshot.organization_id == organization_id,
+        )
+        .options(
+            selectinload(PortfolioAnalysisSnapshot.findings)
+        )
+        .first()
+    )
+
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Portfolio snapshot not found.",
+        )
+
+    return {
+        "id": snapshot.id,
+        "organization_id": snapshot.organization_id,
+        "analysis_version": snapshot.analysis_version,
+        "total_contracts": snapshot.total_contracts,
+        "total_obligations": snapshot.total_obligations,
+        "total_comparisons": snapshot.total_comparisons,
+        "total_findings": snapshot.total_findings,
+        "summary": snapshot.summary or {},
+        "created_at": snapshot.created_at,
+        "findings": [
+            {
+                "id": finding.id,
+                "snapshot_id": finding.snapshot_id,
+                "portfolio_finding_id": finding.portfolio_finding_id,
+                "rule_id": finding.rule_id,
+                "finding_type": finding.finding_type,
+                "title": finding.title,
+                "description": finding.description,
+                "severity": finding.severity,
+                "status": finding.status,
+                "assessment_status": finding.assessment_status,
+                "details": finding.details,
+                "contract_ids": finding.contract_ids or [],
+                "evidence_ids": finding.evidence_ids or [],
+                "captured_at": finding.captured_at,
+            }
+            for finding in snapshot.findings
+        ],
+    }
+
+
+# =========================================================
+# PORTFOLIO RISK TREND ANALYTICS
+# =========================================================
+
+@router.get(
+    "/{organization_id}/portfolio-risk-trends",
+    response_model=PortfolioRiskTrendResponse,
+)
+def get_portfolio_risk_trends(
+    organization_id: UUID,
+    limit: int = Query(default=10, ge=2, le=50),
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Analyze historical portfolio risk trends using immutable snapshots.
+
+    The latest `limit` snapshots are loaded for the requested
+    organization. This endpoint does not modify snapshots or live findings.
+    """
+
+    try:
+        snapshots = (
+            db.query(PortfolioAnalysisSnapshot)
+            .filter(
+                PortfolioAnalysisSnapshot.organization_id
+                == organization_id
+            )
+            .options(
+                selectinload(PortfolioAnalysisSnapshot.findings)
+            )
+            .order_by(
+                PortfolioAnalysisSnapshot.created_at.desc(),
+                PortfolioAnalysisSnapshot.id.desc(),
+            )
+            .limit(limit)
+            .all()
+        )
+
+        if len(snapshots) < 2:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "At least two portfolio analysis snapshots "
+                    "are required to calculate risk trends."
+                ),
+            )
+
+        return analyze_portfolio_risk_trends(snapshots)
+
+    except PortfolioTrendError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        )
+
+    except SQLAlchemyError:
+        raise HTTPException(
+            status_code=500,
+            detail="Portfolio risk trend analysis could not be completed.",
+        )
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\portfolio_obligations.py
+==============================
+from math import ceil
+from datetime import date
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import require_organization_role
+from app.models.membership import OrganizationMembership
+from app.schemas.contractual_obligation import (
+    ObligationSyncResponse,
+    ObligationUpdate,
+    ContractualObligationResponse,
+    ContractualObligationListResponse,
+)
+from app.services.obligation_lifecycle_service import (
+    ObligationNotFoundError,
+    ObligationValidationError,
+    get_organization_obligation,
+    list_organization_obligations,
+    sync_organization_obligations,
+    update_organization_obligation,
+)
+
+router = APIRouter(prefix="/organizations", tags=["Portfolio Obligations"])
+
+
+def _serialize(record):
+    return {
+        "id": record.id,
+        "organization_id": record.organization_id,
+        "contract_id": record.contract_id,
+        "evidence_record_id": record.evidence_record_id,
+        "obligation_type": record.obligation_type,
+        "obligation_family": record.obligation_family,
+        "description": record.description,
+        "claim": record.claim,
+        "original_text": record.original_text,
+        "duration": record.duration,
+        "verification_status": record.verification_status,
+        "confidence": record.confidence,
+        "due_date": record.due_date,
+        "status": record.status,
+        "assigned_to_user_id": record.assigned_to_user_id,
+        "completion_note": record.completion_note,
+        "completion_evidence_record_id": record.completion_evidence_record_id,
+        "completed_at": record.completed_at,
+        "waived_reason": record.waived_reason,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        "overdue": bool(
+            record.due_date
+            and record.due_date < date.today()
+            and record.status not in {"completed", "waived"}
+        ),
+        "audit_entries": record.audit_entries,
+    }
+
+
+def _handle_error(exc):
+    if isinstance(exc, ObligationNotFoundError):
+        raise HTTPException(404, str(exc))
+    if isinstance(exc, ObligationValidationError):
+        raise HTTPException(422, str(exc))
+    raise HTTPException(500, "Obligation operation failed.")
+
+
+@router.post(
+    "/{organization_id}/obligations/sync",
+    response_model=ObligationSyncResponse,
+)
+def sync_obligations(
+    organization_id: UUID,
+    membership: OrganizationMembership = Depends(require_organization_role("owner", "admin")),
+    db: Session = Depends(get_db),
+):
+    try:
+        return sync_organization_obligations(
+            db, organization_id, membership.user_id, commit=True
+        )
+    except (ObligationNotFoundError, ObligationValidationError) as exc:
+        _handle_error(exc)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(500, "Could not synchronize obligations.")
+
+
+@router.get(
+    "/{organization_id}/obligations",
+    response_model=ContractualObligationListResponse,
+)
+def list_obligations(
+    organization_id: UUID,
+    status: str | None = None,
+    overdue_only: bool = False,
+    contract_id: UUID | None = None,
+    assigned_to_user_id: UUID | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    if status is not None and status not in {"open", "in_progress", "completed", "waived"}:
+        raise HTTPException(422, "Invalid obligation status.")
+    records, total = list_organization_obligations(
+        db, organization_id,
+        status=status,
+        overdue_only=overdue_only,
+        contract_id=contract_id,
+        assigned_to_user_id=assigned_to_user_id,
+        offset=(page - 1) * page_size,
+        limit=page_size,
+    )
+    return {
+        "organization_id": organization_id,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": ceil(total / page_size) if total else 0,
+        "obligations": [_serialize(item) for item in records],
+    }
+
+
+@router.get(
+    "/{organization_id}/obligations/{obligation_id}",
+    response_model=ContractualObligationResponse,
+)
+def get_obligation(
+    organization_id: UUID,
+    obligation_id: UUID,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin", "member")
+    ),
+    db: Session = Depends(get_db),
+):
+    try:
+        return _serialize(get_organization_obligation(db, organization_id, obligation_id))
+    except ObligationNotFoundError as exc:
+        _handle_error(exc)
+
+
+@router.patch(
+    "/{organization_id}/obligations/{obligation_id}",
+    response_model=ContractualObligationResponse,
+)
+def update_obligation(
+    organization_id: UUID,
+    obligation_id: UUID,
+    request: ObligationUpdate,
+    membership: OrganizationMembership = Depends(
+        require_organization_role("owner", "admin")
+    ),
+    db: Session = Depends(get_db),
+):
+    payload = request.model_dump(exclude_unset=True)
+    try:
+        record = update_organization_obligation(
+            db,
+            organization_id,
+            obligation_id,
+            membership.user_id,
+            due_date=payload.get("due_date"),
+            due_date_supplied="due_date" in payload,
+            assigned_to_user_id=payload.get("assigned_to_user_id"),
+            assignment_supplied="assigned_to_user_id" in payload,
+            status=payload.get("status"),
+            completion_note=payload.get("completion_note"),
+            completion_evidence_record_id=payload.get("completion_evidence_record_id"),
+            waived_reason=payload.get("waived_reason"),
+            comment=payload.get("comment"),
+            commit=True,
+        )
+        return _serialize(get_organization_obligation(db, organization_id, record.id))
+    except (ObligationNotFoundError, ObligationValidationError) as exc:
+        _handle_error(exc)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(500, "Could not update obligation.")
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\api\v1\__init__.py
+==============================
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\auth.py
+==============================
+from uuid import UUID
+
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
+
+
+class RegisterRequest(BaseModel):
+    full_name: str = Field(min_length=2, max_length=255)
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=128)
+    organization_name: str = Field(min_length=2, max_length=255)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: UUID
+    full_name: str
+    email: EmailStr
+    is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrganizationResponse(BaseModel):
+    id: UUID
+    name: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+    organization: OrganizationResponse
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\contract.py
+==============================
+from uuid import UUID
+from datetime import datetime, date
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+ContractStatus = Literal[
+    "draft",
+    "active",
+    "expired",
+    "terminated"
+]
+
+
+class ContractCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    contract_type: str | None = Field(default=None, max_length=100)
+    status: ContractStatus = "draft"
+    effective_date: date | None = None
+    expiration_date: date | None = None
+
+
+class ContractUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    contract_type: str | None = Field(default=None, max_length=100)
+    status: ContractStatus | None = None
+    effective_date: date | None = None
+    expiration_date: date | None = None
+
+
+class ContractResponse(BaseModel):
+    id: UUID
+    organization_id: UUID
+    title: str
+    contract_type: str | None
+    status: str
+    effective_date: date | None
+    expiration_date: date | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\contractual_obligation.py
+==============================
+from datetime import date, datetime
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+ObligationStatus = Literal["open", "in_progress", "completed", "waived"]
+
+
+class ObligationSyncResponse(BaseModel):
+    organization_id: UUID
+    created_count: int
+    updated_count: int
+    unchanged_count: int
+    skipped_rejected_count: int
+    unsupported_count: int
+    total_current_records: int
+
+
+class ObligationUpdate(BaseModel):
+    due_date: date | None = None
+    assigned_to_user_id: UUID | None = None
+    status: ObligationStatus | None = None
+    completion_note: str | None = Field(default=None, max_length=5000)
+    completion_evidence_record_id: UUID | None = None
+    waived_reason: str | None = Field(default=None, max_length=5000)
+    comment: str | None = Field(default=None, max_length=4000)
+
+
+class ObligationAuditResponse(BaseModel):
+    id: UUID
+    actor_user_id: UUID | None
+    event_type: str
+    previous_status: str | None
+    new_status: str | None
+    comment: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ContractualObligationResponse(BaseModel):
+    id: UUID
+    organization_id: UUID
+    contract_id: UUID
+    evidence_record_id: UUID
+    obligation_type: str
+    obligation_family: str
+    description: str
+    claim: str
+    original_text: str
+    duration: dict | None
+    verification_status: str
+    confidence: float | None
+    due_date: date | None
+    status: ObligationStatus
+    assigned_to_user_id: UUID | None
+    completion_note: str | None
+    completion_evidence_record_id: UUID | None
+    completed_at: datetime | None
+    waived_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+    overdue: bool
+    audit_entries: list[ObligationAuditResponse] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ContractualObligationListResponse(BaseModel):
+    organization_id: UUID
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    obligations: list[ContractualObligationResponse]
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\document.py
+==============================
+from uuid import UUID
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
+
+
+DocumentStatus = Literal[
+    "uploaded",
+    "processing",
+    "completed",
+    "failed"
+]
+
+
+class DocumentStatusUpdateRequest(BaseModel):
+    processing_status: DocumentStatus
+
+
+class DocumentResponse(BaseModel):
+    id: UUID
+    contract_id: UUID
+    original_filename: str
+    file_type: str
+    file_size: int
+    processing_status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\organization.py
+==============================
+from uuid import UUID
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, EmailStr, ConfigDict, Field
+
+
+class OrganizationMemberResponse(BaseModel):
+    user_id: UUID
+    full_name: str
+    email: EmailStr
+    role: str
+    joined_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrganizationMemberInviteRequest(BaseModel):
+    email: EmailStr
+    role: str = Field(default="member")
+
+
+class OrganizationMemberRoleUpdateRequest(BaseModel):
+    role: Literal["admin", "member"]
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\portfolio_action.py
+==============================
+from datetime import date, datetime
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+ActionPriority = Literal["critical", "high", "medium", "low"]
+ActionStatus = Literal[
+    "proposed", "approved", "rejected", "in_progress", "completed"
+]
+
+
+class PortfolioActionCreate(BaseModel):
+    finding_id: UUID
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    priority: ActionPriority
+    due_date: date | None = None
+    assigned_to_user_id: UUID | None = None
+
+
+class PortfolioActionAssignmentUpdate(BaseModel):
+    assigned_to_user_id: UUID | None = None
+
+
+class PortfolioActionStatusUpdate(BaseModel):
+    status: ActionStatus
+    comment: str | None = Field(default=None, max_length=4000)
+
+
+class PortfolioActionAuditResponse(BaseModel):
+    id: UUID
+    actor_user_id: UUID | None
+    event_type: str
+    previous_status: str | None
+    new_status: str | None
+    comment: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PortfolioActionFindingReference(BaseModel):
+    id: UUID
+    title: str
+    finding_type: str
+    severity: str
+    assessment_status: str
+    status: str
+
+
+class PortfolioActionResponse(BaseModel):
+    id: UUID
+    organization_id: UUID
+    finding_id: UUID
+    title: str
+    description: str
+    rationale: str
+    priority: ActionPriority
+    status: ActionStatus
+    assigned_to_user_id: UUID | None
+    created_by_user_id: UUID | None
+    due_date: date | None
+    created_at: datetime
+    updated_at: datetime
+    finding: PortfolioActionFindingReference | None = None
+    audit_entries: list[PortfolioActionAuditResponse] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PortfolioActionListResponse(BaseModel):
+    organization_id: UUID
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    actions: list[PortfolioActionResponse]
+
+
+class PortfolioActionRecommendationResponse(BaseModel):
+    organization_id: UUID
+    finding_id: UUID
+    created_count: int
+    existing_count: int
+    actions: list[PortfolioActionResponse]
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\portfolio_finding.py
+==============================
+from datetime import datetime
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# =========================================================
+# ENUMS / TYPES
+# =========================================================
+
+PortfolioFindingStatus = Literal[
+    "open",
+    "acknowledged",
+    "resolved",
+]
+
+PortfolioFindingType = Literal[
+    "similarity",
+    "potential_conflict",
+    "repeated_risk",
+    "exposure_concentration",
+]
+
+PortfolioFindingSeverity = Literal[
+    "critical",
+    "high",
+    "medium",
+    "low",
+]
+
+
+# =========================================================
+# PORTFOLIO FINDING REQUEST SCHEMAS
+# =========================================================
+
+class PortfolioFindingStatusUpdate(BaseModel):
+    status: PortfolioFindingStatus
+
+
+# =========================================================
+# PORTFOLIO FINDING REFERENCE SCHEMAS
+# =========================================================
+
+class PortfolioContractReference(BaseModel):
+    id: UUID
+    title: str
+    status: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PortfolioEvidenceReference(BaseModel):
+    evidence_id: UUID
+    contract_id: UUID
+    contract_title: str | None = None
+
+    evidence_type: str
+    claim: str
+    evidence_text: str
+
+    verification_status: str
+    confidence: float | None = None
+
+    page_number: int | None = None
+    clause_id: UUID | None = None
+    document_id: UUID
+
+
+# =========================================================
+# PORTFOLIO FINDING RESPONSE
+# =========================================================
+
+class PortfolioFindingResponse(BaseModel):
+    id: UUID
+    organization_id: UUID
+
+    finding_type: str
+    title: str
+    description: str
+
+    severity: str
+    status: str
+    assessment_status: str
+
+    detection_method: str
+    rule_id: str
+    rule_version: str
+
+    confidence: float | None = None
+    details: Any | None = None
+
+    created_at: datetime
+
+    contracts: list[PortfolioContractReference]
+    evidence: list[PortfolioEvidenceReference]
+
+
+# =========================================================
+# PORTFOLIO FINDING LIST RESPONSE
+# =========================================================
+
+class PortfolioFindingListResponse(BaseModel):
+    organization_id: UUID
+
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+    findings: list[PortfolioFindingResponse]
+
+
+# =========================================================
+# PORTFOLIO ANALYSIS RESPONSE
+# =========================================================
+
+class PortfolioAnalysisSummary(BaseModel):
+    retrieval: dict[str, Any]
+    intelligence: dict[str, Any]
+    generation: dict[str, Any]
+    persistence: dict[str, int]
+
+
+class PortfolioAnalysisResponse(BaseModel):
+    organization_id: UUID
+    status: Literal["completed"]
+
+    summary: PortfolioAnalysisSummary
+
+    findings: list[PortfolioFindingResponse]
+    human_review_queue: list[dict[str, Any]]
+
+
+# =========================================================
+# PORTFOLIO EVOLUTION RESPONSE
+# =========================================================
+
+class PortfolioEvolutionResponse(BaseModel):
+    organization_id: UUID
+
+    previous_snapshot_id: UUID
+    current_snapshot_id: UUID
+
+    previous_snapshot_created_at: datetime
+    current_snapshot_created_at: datetime
+
+    summary: dict[str, int]
+    findings: list[dict[str, Any]]
+
+    human_review_required: bool
+
+
+# =========================================================
+# PORTFOLIO SNAPSHOT HISTORY
+# =========================================================
+
+class PortfolioSnapshotListItem(BaseModel):
+    id: UUID
+    organization_id: UUID
+
+    analysis_version: str
+
+    total_contracts: int
+    total_obligations: int
+    total_comparisons: int
+    total_findings: int
+
+    summary: dict[str, Any]
+    created_at: datetime
+
+
+class PortfolioSnapshotListResponse(BaseModel):
+    organization_id: UUID
+
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+    snapshots: list[PortfolioSnapshotListItem]
+
+
+# =========================================================
+# PORTFOLIO SNAPSHOT FINDING RESPONSE
+# =========================================================
+
+class PortfolioSnapshotFindingResponse(BaseModel):
+    id: UUID
+    snapshot_id: UUID
+    portfolio_finding_id: UUID | None = None
+
+    rule_id: str
+    finding_type: str
+    title: str
+    description: str
+
+    severity: str
+    status: str
+    assessment_status: str
+
+    details: Any | None = None
+
+    contract_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+    captured_at: datetime
+
+
+# =========================================================
+# PORTFOLIO SNAPSHOT DETAIL RESPONSE
+# =========================================================
+
+class PortfolioSnapshotDetailResponse(BaseModel):
+    id: UUID
+    organization_id: UUID
+
+    analysis_version: str
+
+    total_contracts: int
+    total_obligations: int
+    total_comparisons: int
+    total_findings: int
+
+    summary: dict[str, Any]
+    created_at: datetime
+
+    findings: list[PortfolioSnapshotFindingResponse]
+
+
+# =========================================================
+# PORTFOLIO RISK TREND RESPONSE
+# =========================================================
+
+class PortfolioRiskScoreTrend(BaseModel):
+    initial: int
+    latest: int
+    change: int
+    direction: Literal[
+        "increasing",
+        "decreasing",
+        "stable",
+    ]
+    interpretation: str
+
+
+class PortfolioFindingCountTrend(BaseModel):
+    initial: int
+    latest: int
+    change: int
+
+
+class PortfolioSnapshotTrendMetric(BaseModel):
+    snapshot_id: UUID
+    created_at: datetime
+
+    total_findings: int
+
+    severity_distribution: dict[str, int]
+    weighted_risk_score: int
+
+
+class PortfolioRiskPattern(BaseModel):
+    rule_id: str
+    title: str
+    finding_type: str
+
+    classification: Literal[
+        "emerging",
+        "persistent",
+        "recurring",
+        "not_detected_in_latest",
+        "intermittent",
+    ]
+
+    appearances: int
+    total_snapshots: int
+
+    first_detected_at: datetime
+    last_detected_at: datetime
+
+    detected_in_latest_snapshot: bool
+
+    latest_severity: str
+
+    severity_history: list[str]
+    status_history: list[str]
+    assessment_status_history: list[str]
+
+    contract_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+    human_review_required: bool
+
+
+class PortfolioRiskTrendResponse(BaseModel):
+    organization_id: UUID
+
+    snapshot_count: int
+
+    first_snapshot_id: UUID
+    latest_snapshot_id: UUID
+
+    overall_trend: Literal[
+        "increasing",
+        "decreasing",
+        "stable",
+    ]
+
+    risk_score: PortfolioRiskScoreTrend
+    finding_count: PortfolioFindingCountTrend
+
+    severity_distribution: dict[str, dict[str, int]]
+
+    classification_summary: dict[str, int]
+
+    snapshot_history: list[PortfolioSnapshotTrendMetric]
+
+    risk_patterns: list[PortfolioRiskPattern]
+
+    human_review_required: bool
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\risk_event.py
+==============================
+from datetime import datetime
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict
+
+
+class RiskEventResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    risk_finding_id: UUID | None
+    contract_id: UUID
+    event_type: str
+    source: str
+    actor_id: UUID | None
+    summary: str
+    previous_state: dict[str, Any] | None
+    new_state: dict[str, Any] | None
+    evidence_snapshot: Any | None
+    created_at: datetime
+
+
+class RiskEventTimelineResponse(BaseModel):
+    organization_id: UUID
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    events: list[RiskEventResponse]
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\risk_explanation.py
+==============================
+from typing import Optional
+from pydantic import BaseModel
+
+
+class RiskExplanationResponse(BaseModel):
+    risk_finding_id: str
+    risk: dict
+    why_it_matters: str
+
+    supporting_evidence: list[dict]
+    rejected_evidence: list[dict]
+
+    uncertainties: list[str]
+    evidence_summary: dict
+
+    recommended_action: str
+    human_review_required: bool
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\risk_investigation.py
+==============================
+from datetime import datetime
+from pydantic import BaseModel
+
+
+class RiskInvestigationResponse(BaseModel):
+
+    risk_finding_id: str
+
+    risk_overview: dict
+
+    investigation_summary: dict
+
+    timeline: list[dict]
+
+    evidence_evolution: list[dict]
+
+    assessment_evolution: list[dict]
+
+    current_evidence: dict
+
+    unresolved_questions: list[str]
+
+    recommended_action: str
+
+    human_review_required: bool
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\risk_scoring.py
+==============================
+from pydantic import BaseModel
+from typing import Optional
+
+
+class RiskScoreFactors(BaseModel):
+    severity: float
+    deadline_urgency: float
+    evidence_completeness: float
+    verification: float
+    evidence_confidence: float
+
+
+class RiskScoreEvidence(BaseModel):
+    total: int
+    verified: int
+    missing_or_incomplete: list[str]
+
+
+class RiskScoreResponse(BaseModel):
+    risk_finding_id: str
+    contract_id: str
+    title: str
+    risk_type: str
+    severity: str
+    status: str
+
+    risk_score: float
+    priority: str
+
+    evidence_confidence: Optional[float]
+
+    factors: RiskScoreFactors
+    evidence: RiskScoreEvidence
+
+    explanation: str
+
+==============================
+FILE: C:\Users\simik\PACTELLE\backend\app\schemas\__init__.py
+==============================

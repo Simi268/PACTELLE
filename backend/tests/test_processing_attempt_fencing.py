@@ -93,6 +93,7 @@ def test_start_processing_assigns_and_schedules_attempt_token(
 ):
     document = contract_api_data["document_a"]
     owner = contract_api_data["owner_a"]
+    organization_id = contract_api_data["organization_a"].id
     scheduled = {}
 
     def capture_task(self, func, *args, **kwargs):
@@ -102,20 +103,29 @@ def test_start_processing_assigns_and_schedules_attempt_token(
     monkeypatch.setattr(
         document_processing.BackgroundTasks, "add_task", capture_task
     )
+
     response = api_client.post(
         f"/api/v1/documents/{document.id}/process",
         headers={"Authorization": f"Bearer {create_access_token(owner.id)}"},
     )
 
     assert response.status_code == 202
+
     attempt_id = UUID(response.json()["processing_attempt_id"])
-    assert scheduled["func"] is document_processing.process_document_pipeline
-    assert scheduled["args"] == (document.id, attempt_id)
+
+    assert scheduled["func"] is document_processing.run_document_processing
+    assert scheduled["args"] == (
+        document.id,
+        attempt_id,
+        organization_id,
+    )
 
     db_session.expire_all()
+
     refreshed = db_session.query(ContractDocument).filter(
         ContractDocument.id == document.id
     ).one()
+
     assert refreshed.processing_status == "processing"
     assert refreshed.processing_attempt_id == attempt_id
     assert refreshed.processing_started_at is not None

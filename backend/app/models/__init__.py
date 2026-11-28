@@ -23,3 +23,7 @@ from app.models.portfolio_risk_action import (
     PortfolioRiskAction,
     PortfolioRiskActionAudit,
 )
+from app.models.contractual_obligation import (
+    ContractualObligation,
+    ContractualObligationAudit,
+)

@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.dependencies import get_authorized_document
 from app.models.document import ContractDocument
-from app.services.document_pipeline import process_document_pipeline
+from app.orchestration.document_processing_runner import (
+    run_document_processing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,15 +36,19 @@ def start_document_processing(
     attempt_id = uuid4()
 
     try:
+        # Resolve organization ownership while the request session is active.
+        organization_id = document.contract.organization_id
+
         document.processing_status = "processing"
         document.processing_started_at = datetime.now(timezone.utc)
         document.processing_attempt_id = attempt_id
         db.commit()
 
         background_tasks.add_task(
-            process_document_pipeline,
+            run_document_processing,
             document_id,
             attempt_id,
+            organization_id,
         )
 
     except Exception:

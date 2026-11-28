@@ -107,18 +107,20 @@ def _serialize_finding(finding):
         contract = document.contract if document else None
 
         evidence.append({
-            "evidence_id": record.id,
-            "contract_id": contract.id if contract else None,
-            "contract_title": contract.title if contract else None,
-            "evidence_type": record.evidence_type,
-            "claim": record.claim,
-            "evidence_text": record.evidence_text,
-            "verification_status": record.verification_status,
-            "confidence": record.confidence,
-            "page_number": record.page_number,
-            "clause_id": record.clause_id,
-            "document_id": record.document_id,
-        })
+    "evidence_id": record.id,
+    "contract_id": contract.id if contract else None,
+    "contract_title": contract.title if contract else None,
+    "evidence_type": record.evidence_type,
+    "claim": record.claim,
+    "evidence_text": record.evidence_text,
+    "verification_status": record.verification_status,
+    "confidence": record.confidence,
+    "page_number": record.page_number,
+    "clause_id": record.clause_id,
+    "document_id": record.document_id,
+    "char_start": record.char_start,
+    "char_end": record.char_end,
+})
 
     return {
         "id": finding.id,

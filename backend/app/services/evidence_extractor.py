@@ -323,17 +323,41 @@ def extract_evidence_from_clause(clause):
 
         elif category == "liability":
 
-            if "aggregate liability" in lower and "exceed" in lower:
+            # Capture general and enhanced caps, including caps expressed
+            # with a multiplier, without requiring a reference period.
+            has_cap_language = bool(re.search(
+                r"\b(aggregate liability|total liability|liability .*? shall not exceed|liability .*? will not exceed|liability .*? capped)\b",
+                lower,
+            )) and bool(re.search(r"\b(exceed|capped|cap|limit)\b", lower))
 
-                months = extract_number(sentence, "months")
+            if has_cap_language:
+                multiplier = re.search(
+                    r"\b(\d+(?:\.\d+)?\s*(?:x|×|times)|one|two|three|four|five(?:\s*\(\s*\d+\s*\))?\s+times|twice|double|triple)\b",
+                    lower,
+                )
+                period = extract_number(sentence, "months") or extract_number(sentence, "years")
+                tier = "enhanced" if re.search(
+                    r"\b(confidentiality|data protection|personal data|security|indemnity|indemnification|intellectual property)\b",
+                    lower,
+                ) else "general"
+                description = f"{tier.title()} liability cap provision detected"
+                if multiplier:
+                    description += f" with multiplier wording: {multiplier.group(0)}"
+                if period:
+                    description += f" and a stated {period}-unit reference period"
+                add_evidence("liability_cap", description + ".", sentence_data)
 
-                if months is not None:
-
-                    add_evidence(
-                        "liability_cap",
-                        f"Aggregate liability is capped by fees paid or payable during the preceding {months} months.",
-                        sentence_data
-                    )
+            # Preserve carve-outs/exceptions as separate evidence so they
+            # can be compared without conflating them with the cap amount.
+            if re.search(
+                r"\b(except|excluding|excludes?|shall not apply|does not apply|carve[- ]?out|notwithstanding|will not limit|shall not limit)\b",
+                lower,
+            ) and re.search(r"\b(liability|cap|limit|damages|fraud|misconduct|negligence|indemnity)\b", lower):
+                add_evidence(
+                    "liability_exceptions",
+                    "A liability exception or carve-out provision was detected; the listed categories require review.",
+                    sentence_data,
+                )
 
             if "consequential damages" in lower:
 

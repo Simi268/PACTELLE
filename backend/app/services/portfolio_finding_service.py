@@ -206,6 +206,21 @@ def persist_portfolio_findings(
                 )
 
                 if duplicate:
+                    duplicate.finding_type = finding_type
+                    duplicate.title = candidate["title"]
+                    duplicate.description = candidate["description"]
+                    duplicate.severity = severity
+                    duplicate.assessment_status = assessment_status
+                    duplicate.detection_method = candidate.get(
+                        "detection_method",
+                        "rule_based",)
+                    duplicate.rule_version = candidate.get(
+                        "rule_version",
+                        "1.0",
+                        )
+                    duplicate.confidence = candidate.get("confidence")
+                    duplicate.details = candidate.get("details")
+
                     existing.append(duplicate)
                     continue
 

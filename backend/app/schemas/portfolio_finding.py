@@ -66,6 +66,9 @@ class PortfolioEvidenceReference(BaseModel):
     clause_id: UUID | None = None
     document_id: UUID
 
+    char_start: int | None = None
+    char_end: int | None = None
+
 
 # =========================================================
 # PORTFOLIO FINDING RESPONSE
