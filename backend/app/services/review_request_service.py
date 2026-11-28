@@ -3,6 +3,9 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.models.agent_execution import AgentExecution
+from app.agents.contracts import ExecutionStatus
+from app.agents.state import AgentState
 from app.models.contract import Contract
 from app.models.document import ContractDocument
 from app.models.evidence_record import EvidenceRecord
@@ -171,6 +174,38 @@ def decide_review_request(
     review.decided_by_user_id = actor_user_id
     review.decision_comment = comment
     review.decided_at = datetime.now(timezone.utc) if decision in {"approved", "rejected"} else None
+
+    # A rejection is terminal for the linked workflow. Leaving the execution
+    # in review_required would create an orphaned checkpoint that can never
+    # be resumed. Approval deliberately leaves it suspended until the
+    # Supervisor claims and revalidates the checkpoint. Clarification also
+    # leaves it suspended so a later authorized decision can resolve it.
+    if decision == "rejected" and review.execution_id is not None:
+        execution = (
+            db.query(AgentExecution)
+            .filter(
+                AgentExecution.execution_id == review.execution_id,
+                AgentExecution.organization_id == organization_id,
+                AgentExecution.review_request_id == review.id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if execution is not None:
+            if execution.status != ExecutionStatus.REVIEW_REQUIRED.value:
+                raise ReviewRequestValidationError(
+                    "The linked execution is no longer waiting for this review."
+                )
+            state = AgentState.model_validate(execution.state_snapshot)
+            state.status = ExecutionStatus.CANCELLED
+            state.current_agent = None
+            state.completed_at = datetime.now(timezone.utc)
+            execution.status = ExecutionStatus.CANCELLED.value
+            execution.state_snapshot = state.model_dump(mode="json")
+            execution.completed_at = state.completed_at
+            execution.version += 1
+            execution.updated_at = datetime.now(timezone.utc)
+
     db.add(ReviewRequestAudit(
         review_request_id=review.id,
         actor_user_id=actor_user_id,

@@ -5,6 +5,7 @@ import pytest
 from app.agents.contracts import AgentTask, ExecutionStatus
 from app.agents.state import AgentState
 from app.models.review_request import ReviewRequest
+from app.services.review_request_service import decide_review_request
 from app.services.agent_execution_service import (
     AgentExecutionConflictError,
     AgentExecutionValidationError,
@@ -166,4 +167,75 @@ def test_stale_version_cannot_overwrite_execution(db_session, contract_api_data)
             next_agent_index=1,
             checkpoint_agent="document",
             expected_version=stale_version,
+        )
+
+
+
+def test_rejected_review_cancels_linked_execution_and_cannot_resume(db_session, contract_api_data):
+    org_id = contract_api_data["organization_a"].id
+    requester_id = contract_api_data["owner_a"].id
+    task = _task(org_id)
+    execution = create_execution(
+        db_session, task=task, requested_by_user_id=requester_id
+    )
+
+    running_state = AgentState(task=task, status=ExecutionStatus.RUNNING)
+    running = save_checkpoint(
+        db_session,
+        organization_id=org_id,
+        execution_id=task.execution_id,
+        state=running_state,
+        next_agent_index=1,
+        checkpoint_agent="verification",
+        expected_version=execution.version,
+    )
+
+    review = ReviewRequest(
+        organization_id=org_id,
+        execution_id=task.execution_id,
+        review_type="evidence_verification",
+        status="pending",
+        reason="Evidence requires review.",
+        evidence_snapshot=[],
+        requested_by_user_id=requester_id,
+    )
+    db_session.add(review)
+    db_session.commit()
+    db_session.refresh(review)
+
+    suspended_state = AgentState(
+        task=task,
+        status=ExecutionStatus.REVIEW_REQUIRED,
+        human_review_required=True,
+    )
+    suspend_for_review(
+        db_session,
+        organization_id=org_id,
+        execution_id=task.execution_id,
+        review_request_id=review.id,
+        state=suspended_state,
+        checkpoint_agent="verification",
+        next_agent_index=1,
+        expected_version=running.version,
+    )
+
+    decided = decide_review_request(
+        db_session,
+        organization_id=org_id,
+        review_id=review.id,
+        actor_user_id=requester_id,
+        decision="rejected",
+        comment="Evidence could not be accepted.",
+    )
+    assert decided.status == "rejected"
+
+    cancelled = get_execution(
+        db_session, organization_id=org_id, execution_id=task.execution_id
+    )
+    assert cancelled.status == ExecutionStatus.CANCELLED.value
+    assert load_execution_state(cancelled).status == ExecutionStatus.CANCELLED
+
+    with pytest.raises(AgentExecutionConflictError):
+        claim_approved_resume(
+            db_session, organization_id=org_id, execution_id=task.execution_id
         )
