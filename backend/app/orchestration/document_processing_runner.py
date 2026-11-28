@@ -3,7 +3,7 @@
 import logging
 from uuid import UUID
 
-from app.agents.contracts import AgentTask, ExecutionStatus
+from app.agents.contracts import AgentTask
 from app.agents.document_agent import DocumentAgent
 from app.orchestration.supervisor import Supervisor
 
@@ -56,5 +56,9 @@ def run_document_processing(
         "errors": [
             error.model_dump(mode="json")
             for error in result.errors
+        ],
+        "execution_trace": [
+            record.model_dump(mode="json")
+            for record in result.execution_trace
         ],
     }

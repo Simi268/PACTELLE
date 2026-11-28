@@ -16,6 +16,7 @@ from app.api.v1.intelligence import router as intelligence_router
 from app.api.v1.portfolio_intelligence import router as portfolio_intelligence_router
 from app.api.v1.portfolio_actions import router as portfolio_actions_router
 from app.api.v1.portfolio_obligations import router as portfolio_obligations_router
+from app.api.v1.reviews import router as reviews_router
 from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI(
     title="PACTELLE API",
@@ -46,6 +47,7 @@ app.include_router(intelligence_router, prefix="/api/v1")
 app.include_router(portfolio_intelligence_router, prefix="/api/v1")
 app.include_router(portfolio_actions_router, prefix="/api/v1")
 app.include_router(portfolio_obligations_router, prefix="/api/v1")
+app.include_router(reviews_router, prefix="/api/v1")
 
 
 @app.get("/")

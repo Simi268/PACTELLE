@@ -1,0 +1,97 @@
+from uuid import uuid4
+
+from app.agents.contracts import (
+    AgentError,
+    AgentName,
+    AgentResult,
+    AgentStatus,
+    AgentTask,
+    ExecutionStatus,
+)
+from app.orchestration.supervisor import Supervisor
+
+
+def make_task():
+    return AgentTask(
+        organization_id=uuid4(),
+        task_type="trace_test",
+    )
+
+
+def make_handler(name, status=AgentStatus.COMPLETED):
+    def handler(state):
+        if status == AgentStatus.FAILED:
+            return AgentResult(
+                agent=name,
+                status=status,
+                error=AgentError(
+                    agent=name,
+                    code="EXPECTED_FAILURE",
+                    message="Synthetic failure",
+                    retryable=False,
+                ),
+            )
+        return AgentResult(agent=name, status=status)
+
+    handler.agent_name = name
+    return handler
+
+
+def test_supervisor_records_each_completed_agent_invocation():
+    state = Supervisor([
+        make_handler(AgentName.DOCUMENT),
+        make_handler(AgentName.OBLIGATION),
+    ]).run(make_task())
+
+    assert state.status == ExecutionStatus.COMPLETED
+    assert [record.agent for record in state.execution_trace] == [
+        AgentName.DOCUMENT,
+        AgentName.OBLIGATION,
+    ]
+    assert all(
+        record.status == ExecutionStatus.COMPLETED
+        for record in state.execution_trace
+    )
+    assert all(record.duration_ms >= 0 for record in state.execution_trace)
+    assert all(
+        record.completed_at >= record.started_at
+        for record in state.execution_trace
+    )
+
+
+def test_supervisor_records_terminal_agent_failure_and_stops():
+    later_agent_called = []
+
+    def later_agent(state):
+        later_agent_called.append(True)
+        return AgentResult(
+            agent=AgentName.INTELLIGENCE,
+            status=AgentStatus.COMPLETED,
+        )
+
+    later_agent.agent_name = AgentName.INTELLIGENCE
+
+    state = Supervisor([
+        make_handler(AgentName.OBLIGATION, AgentStatus.FAILED),
+        later_agent,
+    ]).run(make_task())
+
+    assert state.status == ExecutionStatus.FAILED
+    assert later_agent_called == []
+    assert len(state.execution_trace) == 1
+    assert state.execution_trace[0].status == ExecutionStatus.FAILED
+    assert state.execution_trace[0].error_code == "EXPECTED_FAILURE"
+
+
+def test_supervisor_records_unexpected_handler_exception():
+    def broken_agent(state):
+        raise RuntimeError("unexpected failure")
+
+    broken_agent.agent_name = AgentName.DOCUMENT
+
+    state = Supervisor([broken_agent]).run(make_task())
+
+    assert state.status == ExecutionStatus.FAILED
+    assert len(state.execution_trace) == 1
+    assert state.execution_trace[0].status == ExecutionStatus.FAILED
+    assert state.execution_trace[0].error_code == "AGENT_EXECUTION_ERROR"

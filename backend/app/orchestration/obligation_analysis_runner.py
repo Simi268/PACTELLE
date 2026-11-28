@@ -69,6 +69,11 @@ def run_organization_obligation_analysis(
             for error in state.errors
         ],
         "agent_results": agent_results,
+        "gate_decisions": state.gate_decisions,
+        "execution_trace": [
+            record.model_dump(mode="json")
+            for record in state.execution_trace
+        ],
         "obligation_result": agent_results.get("obligation"),
         "intelligence_result": agent_results.get("intelligence"),
     }
