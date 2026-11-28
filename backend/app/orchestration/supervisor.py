@@ -13,6 +13,9 @@ from app.agents.contracts import (
 )
 from app.agents.state import AgentState
 from app.orchestration.execution_status import transition_status
+from app.orchestration.verification_gate import (
+    evaluate_verification_gate,
+)
 
 
 AgentHandler = Callable[[AgentState], AgentResult]
@@ -22,19 +25,21 @@ class Supervisor:
     """
     Coordinates agent execution.
 
-    The supervisor:
-    - Executes registered agents in order.
-    - Shares execution state.
-    - Collects evidence references.
-    - Tracks uncertainty.
-    - Stops execution after failure or an incomplete outcome.
-    - Routes uncertain results for human review.
+    Supports sequential execution and an evidence verification gate.
 
-    It does not make LLM calls or write to the database.
+    The supervisor does not make LLM calls or write to the database.
     """
 
     def __init__(self, handlers: Iterable[AgentHandler]):
         self.handlers: List[AgentHandler] = list(handlers)
+
+        names = [
+            self._handler_agent_name(handler)
+            for handler in self.handlers
+        ]
+
+        if len(names) != len(set(names)):
+            raise ValueError("Duplicate agent handlers are not allowed.")
 
     def run(self, task: AgentTask) -> AgentState:
         state = AgentState(task=task)
@@ -78,6 +83,25 @@ class Supervisor:
                         f"Unsupported agent result status: "
                         f"{result.status.value}"
                     )
+
+                # Evidence verification gate.
+                if agent_name == AgentName.VERIFICATION:
+                    decision = evaluate_verification_gate(state)
+
+                    state.gate_decisions["evidence_verification"] = decision
+
+                    if not decision["passed"]:
+                        state.human_review_required = True
+
+                        state.unresolved_questions.extend(
+                            decision["reasons"]
+                        )
+
+                        state.status = transition_status(
+                            state.status,
+                            ExecutionStatus.REVIEW_REQUIRED,
+                        )
+                        break
 
             except Exception as exc:
                 error = AgentError(

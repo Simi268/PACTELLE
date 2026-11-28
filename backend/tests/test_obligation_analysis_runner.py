@@ -7,6 +7,7 @@ from app.agents.contracts import (
 )
 from app.orchestration.execution_status import ExecutionStatus
 from app.orchestration import obligation_analysis_runner
+from app.agents.contracts import AgentName
 
 
 class FakeSupervisor:
@@ -86,11 +87,10 @@ def test_runner_registers_agents_in_correct_order(monkeypatch):
     )
 
     handlers = FakeSupervisor.received_handlers
-
-    assert len(handlers) == 2
-
+    assert len(handlers) == 3
     assert handlers[0].agent_name == AgentName.OBLIGATION
-    assert handlers[1].agent_name == AgentName.INTELLIGENCE
+    assert handlers[1].agent_name == AgentName.VERIFICATION
+    assert handlers[2].agent_name == AgentName.INTELLIGENCE
 
 
 def test_runner_returns_both_agent_results(monkeypatch):

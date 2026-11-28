@@ -37,6 +37,10 @@ class AgentState(BaseModel):
         default_factory=dict
     )
 
+    gate_decisions: Dict[str, dict] = Field(
+    default_factory=dict
+)
+
     evidence_references: List[EvidenceReference] = Field(
         default_factory=list
     )
@@ -85,3 +89,7 @@ class AgentState(BaseModel):
 
         if result.error is not None:
             self.errors.append(result.error)
+
+        gate_decisions: Dict[str, dict] = Field(
+    default_factory=dict
+)

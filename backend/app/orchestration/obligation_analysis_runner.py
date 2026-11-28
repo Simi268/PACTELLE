@@ -8,6 +8,8 @@ from app.agents.obligation_agent import ObligationAgent
 from app.agents.intelligence_agent import IntelligenceAgent
 from app.orchestration.supervisor import Supervisor
 
+from app.agents.verification_agent import VerificationAgent
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,11 +36,12 @@ def run_organization_obligation_analysis(
     )
 
     supervisor = Supervisor(
-        handlers=[
-            ObligationAgent(),
-            IntelligenceAgent(),
-        ]
-    )
+    handlers=[
+        ObligationAgent(),
+        VerificationAgent(),
+        IntelligenceAgent(),
+    ]
+)
 
     state = supervisor.run(task)
 
